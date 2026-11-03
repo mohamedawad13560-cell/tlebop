@@ -1,18 +1,9 @@
-// بوت تيليجرام لقسم التحقيق: قضايا، مشتبه بهم، أدلة، تقارير، وبحث
 require("dotenv").config();
 const { Telegraf, Markup } = require("telegraf");
 const db = require("./db");
 
 const TOKEN = process.env.BOT_TOKEN;
 if (!TOKEN) throw new Error("BOT_TOKEN مفقود في ملف .env");
-// اختياري: لتقييد البوت بمعرّفات محددة (مفصولة بفاصلة). اتركه فارغاً ليعمل للجميع
-const ALLOWED = new Set(
-  (process.env.ALLOWED_IDS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map(Number),
-);
 
 const LABELS = {
   cases: "📁 القضايا",
@@ -28,10 +19,9 @@ const SINGLE = {
   reports: "تقرير",
   accounts: "حساب مشبوه",
 };
-// حقول اختيارية يمكن تخطيها بكتابة: تخطي
 const OPTIONAL = new Set(["fake_account"]);
+const KINDS = Object.keys(LABELS);
 
-// خطوات الإدخال لكل قسم: [اسم الحقل، السؤال]
 const STEPS = {
   cases: [
     ["title", "عنوان القضية؟"],
@@ -57,55 +47,46 @@ const STEPS = {
   ],
 };
 
-const states = new Map(); // userId -> حالة الإدخال أو البحث الحالية
+const states = new Map();
 const bot = new Telegraf(TOKEN);
 
-// ---------- الصلاحيات ----------
-bot.use(async (ctx, next) => {
-  if (!ctx.from) return;
-  // إذا كانت ALLOWED_IDS فارغة يعمل البوت للجميع بدون قيود
-  if (!ALLOWED.size || ALLOWED.has(ctx.from.id)) return next();
-  const text = `⛔ غير مصرّح لك باستخدام هذا البوت.\nمعرّفك: ${ctx.from ? ctx.from.id : "?"}`;
-  if (ctx.callbackQuery) return ctx.answerCbQuery(text, { show_alert: true });
-  if (ctx.message) return ctx.reply(text);
-});
+const fmtDate = (date) => new Date(date).toLocaleString("en-GB");
 
-// ---------- أدوات العرض ----------
-const fmtDate = (d) => new Date(d).toLocaleString("en-GB");
-
-function itemTitle(kind, r) {
-  if (kind === "cases") return `${db.caseNo(r.id)} | ${r.title}`;
-  if (kind === "suspects") return `${r.name} (${db.caseNo(r.case_id)})`;
+function itemTitle(kind, record) {
+  if (kind === "cases") return `${db.caseNo(record.id)} | ${record.title}`;
+  if (kind === "suspects")
+    return `${record.name} (${db.caseNo(record.case_id)})`;
   if (kind === "evidence")
-    return `دليل #${r.id}: ${(r.description || "").slice(0, 30)}`;
+    return `دليل #${record.id}: ${(record.description || "").slice(0, 30)}`;
   if (kind === "accounts")
-    return `${r.platform}: ${r.username} (${db.caseNo(r.case_id)})`;
-  return `${r.title} (${db.caseNo(r.case_id)})`;
+    return `${record.platform}: ${record.username} (${db.caseNo(record.case_id)})`;
+  return `${record.title} (${db.caseNo(record.case_id)})`;
 }
 
-const itemCb = (kind, r) =>
-  kind === "cases" ? `case:${r.id}` : `item:${kind}:${r.id}`;
+const itemCb = (kind, record) =>
+  kind === "cases" ? `case:${record.id}` : `item:${kind}:${record.id}`;
 
-async function itemText(kind, r) {
-  const meta = `\n\n🕒 ${fmtDate(r.created_at)}\n✍️ ${r.created_by}`;
+async function itemText(kind, record) {
+  const meta = `\n\n🕒 ${fmtDate(record.created_at)}\n✍️ ${record.created_by || "غير محدد"}`;
   if (kind === "cases") {
-    const n = await db.countByCase(r.id);
+    const counts = await db.countByCase(record.id);
     return (
-      `📁 ${db.caseNo(r.id)} — ${r.title}\nالحالة: ${r.status}\n\n${r.description || ""}\n\n` +
-      `👤 مشتبه بهم: ${n.suspects} | 🧾 أدلة: ${n.evidence} | 📝 تقارير: ${n.reports} | 🕶️ حسابات مشبوهة: ${n.accounts}${meta}`
+      `📁 ${db.caseNo(record.id)} — ${record.title}\nالحالة: ${record.status}\n\n${record.description || ""}\n\n` +
+      `👤 مشتبه بهم: ${counts.suspects} | 🧾 أدلة: ${counts.evidence} | 📝 تقارير: ${counts.reports} | 🕶️ حسابات مشبوهة: ${counts.accounts}${meta}`
     );
   }
-  const caseLine = `القضية: ${db.caseNo(r.case_id)}\n`;
+
+  const caseLine = `القضية: ${db.caseNo(record.case_id)}\n`;
   if (kind === "suspects") {
-    return `👤 ${r.name}\n${caseLine}🎭 الحساب الوهمي: ${r.fake_account || "غير محدد"}\n\n${r.details || ""}${meta}`;
+    return `👤 ${record.name}\n${caseLine}🎭 الحساب الوهمي: ${record.fake_account || "غير محدد"}\n\n${record.details || ""}${meta}`;
   }
   if (kind === "accounts") {
-    return `🕶️ حساب مشبوه #${r.id}\n${caseLine}المنصة: ${r.platform}\nالحساب: ${r.username}\n\n${r.details || ""}${meta}`;
+    return `🕶️ حساب مشبوه #${record.id}\n${caseLine}المنصة: ${record.platform}\nالحساب: ${record.username}\n\n${record.details || ""}${meta}`;
   }
   if (kind === "evidence") {
-    return `🧾 دليل #${r.id}\n${caseLine}${r.file_id ? "📎 يوجد مرفق" : "بدون مرفق"}\n\n${r.description}${meta}`;
+    return `🧾 دليل #${record.id}\n${caseLine}${record.file_id ? "📎 يوجد مرفق" : "بدون مرفق"}\n\n${record.description}${meta}`;
   }
-  return `📝 ${r.title}\n${caseLine}\n${r.body || ""}${meta}`;
+  return `📝 ${record.title}\n${caseLine}\n${record.body || ""}${meta}`;
 }
 
 const backRow = (target = "menu") => [
@@ -129,16 +110,16 @@ const mainMenuRows = () => [
 ];
 
 async function show(ctx, text, rows) {
-  const kb = Markup.inlineKeyboard(rows);
-  const body = text.length > 4000 ? text.slice(0, 4000) + "…" : text;
+  const keyboard = Markup.inlineKeyboard(rows);
+  const body = text.length > 4000 ? `${text.slice(0, 4000)}…` : text;
   if (ctx.callbackQuery) {
     try {
-      await ctx.editMessageText(body, kb);
-    } catch (e) {
-      if (!/not modified/i.test(e.message)) throw e;
+      await ctx.editMessageText(body, keyboard);
+    } catch (error) {
+      if (!/message is not modified/i.test(error.message)) throw error;
     }
   } else {
-    await ctx.reply(body, kb);
+    await ctx.reply(body, keyboard);
   }
 }
 
@@ -146,9 +127,10 @@ const showMenu = (ctx) =>
   show(ctx, "🕵️ بوت قسم التحقيق\nاختر القسم:", mainMenuRows());
 
 async function showList(ctx, kind, caseId) {
-  const rows = await db.list(kind, caseId);
-  const buttons = rows.map((r) => [
-    Markup.button.callback(itemTitle(kind, r), itemCb(kind, r)),
+  if (!KINDS.includes(kind)) return showMenu(ctx);
+  const records = await db.list(kind, caseId);
+  const buttons = records.map((record) => [
+    Markup.button.callback(itemTitle(kind, record), itemCb(kind, record)),
   ]);
   let back = "menu";
   if (kind !== "cases" && caseId) {
@@ -161,20 +143,20 @@ async function showList(ctx, kind, caseId) {
     back = `case:${caseId}`;
   }
   buttons.push(backRow(back));
-  const head = LABELS[kind] + (caseId ? ` — ${db.caseNo(caseId)}` : "");
+  const heading = LABELS[kind] + (caseId ? ` — ${db.caseNo(caseId)}` : "");
   await show(
     ctx,
-    head + (rows.length ? "" : "\n\nلا توجد سجلات بعد."),
+    heading + (records.length ? "" : "\n\nلا توجد سجلات بعد."),
     buttons,
   );
 }
 
 async function showCase(ctx, id) {
-  const r = await db.get("cases", id);
-  if (!r) return show(ctx, "القضية غير موجودة.", [backRow()]);
+  const record = await db.get("cases", id);
+  if (!record) return show(ctx, "القضية غير موجودة.", [backRow()]);
   const toggle =
-    r.status === "مفتوحة" ? "🔒 إغلاق القضية" : "🔓 إعادة فتح القضية";
-  await show(ctx, await itemText("cases", r), [
+    record.status === "مفتوحة" ? "🔒 إغلاق القضية" : "🔓 إعادة فتح القضية";
+  await show(ctx, await itemText("cases", record), [
     [
       Markup.button.callback("👤 المشتبه بهم", `list:suspects:${id}`),
       Markup.button.callback("🧾 الأدلة", `list:evidence:${id}`),
@@ -189,12 +171,14 @@ async function showCase(ctx, id) {
 }
 
 async function showItem(ctx, kind, id) {
-  const r = await db.get(kind, id);
-  if (!r) return show(ctx, "السجل غير موجود.", [backRow()]);
-  await show(ctx, await itemText(kind, r), [
-    backRow(`list:${kind}:${r.case_id}`),
+  if (!KINDS.includes(kind) || kind === "cases")
+    return showMenu(ctx);
+  const record = await db.get(kind, id);
+  if (!record) return show(ctx, "السجل غير موجود.", [backRow()]);
+  await show(ctx, await itemText(kind, record), [
+    backRow(`list:${kind}:${record.case_id}`),
   ]);
-  if (kind === "evidence" && r.file_id) {
+  if (kind === "evidence" && record.file_id) {
     const senders = {
       photo: "replyWithPhoto",
       video: "replyWithVideo",
@@ -202,115 +186,145 @@ async function showItem(ctx, kind, id) {
       audio: "replyWithAudio",
       document: "replyWithDocument",
     };
-    await ctx[senders[r.file_type] || "replyWithDocument"](r.file_id);
+    const send = ctx[senders[record.file_type] || "replyWithDocument"];
+    await send.call(ctx, record.file_id);
   }
 }
 
-// ---------- الأوامر ----------
+function extractFile(message) {
+  if (message.photo)
+    return [message.photo[message.photo.length - 1].file_id, "photo"];
+  for (const type of ["document", "video", "voice", "audio"]) {
+    if (message[type]) return [message[type].file_id, type];
+  }
+  return [null, null];
+}
+
 bot.start(async (ctx) => {
   states.delete(ctx.from.id);
   await showMenu(ctx);
 });
+
 bot.command("cancel", async (ctx) => {
   states.delete(ctx.from.id);
   await ctx.reply("تم الإلغاء.", Markup.inlineKeyboard(mainMenuRows()));
 });
 
-// ---------- الأزرار ----------
 bot.on("callback_query", async (ctx) => {
   await ctx.answerCbQuery();
-  const [act, a, b] = ctx.callbackQuery.data.split(":");
-  const uid = ctx.from.id;
-  states.delete(uid);
+  const callback = ctx.callbackQuery.data;
+  if (typeof callback !== "string") return;
+  const [action, arg, value] = callback.split(":");
+  const userId = ctx.from.id;
+  states.delete(userId);
 
-  if (act === "menu") return showMenu(ctx);
-  if (act === "list") return showList(ctx, a, Number(b));
-  if (act === "case") return showCase(ctx, Number(a));
-  if (act === "item") return showItem(ctx, a, Number(b));
-  if (act === "toggle") {
-    const r = await db.get("cases", Number(a));
-    if (r) await db.setStatus(r.id, r.status === "مفتوحة" ? "مغلقة" : "مفتوحة");
-    return showCase(ctx, Number(a));
+  if (action === "menu") return showMenu(ctx);
+  if (action === "list" && KINDS.includes(arg) && /^\d+$/.test(value || ""))
+    return showList(ctx, arg, Number(value));
+  if (action === "case" && /^\d+$/.test(arg || ""))
+    return showCase(ctx, Number(arg));
+  if (
+    action === "item" &&
+    KINDS.includes(arg) &&
+    arg !== "cases" &&
+    /^\d+$/.test(value || "")
+  ) {
+    return showItem(ctx, arg, Number(value));
   }
-  if (act === "new") {
-    states.set(uid, {
+  if (action === "toggle" && /^\d+$/.test(arg || "")) {
+    const id = Number(arg);
+    const record = await db.get("cases", id);
+    if (record)
+      await db.setStatus(
+        id,
+        record.status === "مفتوحة" ? "مغلقة" : "مفتوحة",
+      );
+    return showCase(ctx, id);
+  }
+  if (
+    action === "new" &&
+    KINDS.includes(arg) &&
+    /^\d+$/.test(value || "") &&
+    (arg === "cases" || Number(value) > 0)
+  ) {
+    const kind = arg;
+    states.set(userId, {
       mode: "new",
-      kind: a,
-      caseId: Number(b),
+      kind,
+      caseId: Number(value),
       step: 0,
       data: {},
     });
-    return ctx.editMessageText(
-      `➕ ${SINGLE[a]} جديد\n\n${STEPS[a][0][1]}\n\n(/cancel للإلغاء)`,
+    return ctx.reply(
+      `➕ ${SINGLE[kind]} جديد\n\n${STEPS[kind][0][1]}\n\n(/cancel للإلغاء)`,
     );
   }
-  if (act === "search") {
-    states.set(uid, { mode: "search" });
-    return ctx.editMessageText(
+  if (action === "search") {
+    states.set(userId, { mode: "search" });
+    return ctx.reply(
       "🔍 اكتب كلمة البحث (اسم، رقم قضية، وصف...)\n\n(/cancel للإلغاء)",
     );
   }
 });
 
-// ---------- الرسائل (إدخال البيانات والبحث) ----------
-function extractFile(msg) {
-  if (msg.photo) return [msg.photo[msg.photo.length - 1].file_id, "photo"];
-  for (const t of ["document", "video", "voice", "audio"])
-    if (msg[t]) return [msg[t].file_id, t];
-  return [null, null];
-}
-
 bot.on("message", async (ctx) => {
-  const msg = ctx.message;
-  if (msg.text && msg.text.startsWith("/")) return; // أوامر غير معروفة
-  const st = states.get(ctx.from.id);
-  if (!st) return showMenu(ctx);
+  const message = ctx.message;
+  if (message.text && message.text.startsWith("/")) return;
+  const state = states.get(ctx.from.id);
+  if (!state) return showMenu(ctx);
 
-  if (st.mode === "search") {
-    const text = (msg.text || "").trim();
+  if (state.mode === "search") {
+    const text = (message.text || "").trim();
     if (!text) return ctx.reply("اكتب نصاً للبحث.");
     states.delete(ctx.from.id);
     const results = await db.search(text);
-    const buttons = results.map(([k, r]) => [
-      Markup.button.callback(`${SINGLE[k]}: ${itemTitle(k, r)}`, itemCb(k, r)),
+    const buttons = results.map(([kind, record]) => [
+      Markup.button.callback(
+        `${SINGLE[kind]}: ${itemTitle(kind, record)}`,
+        itemCb(kind, record),
+      ),
     ]);
     buttons.push(backRow());
-    const head = results.length
+    const heading = results.length
       ? `نتائج البحث عن «${text}»: ${results.length}`
       : `لا نتائج لـ «${text}»`;
-    return ctx.reply(head, Markup.inlineKeyboard(buttons));
+    return ctx.reply(heading, Markup.inlineKeyboard(buttons));
   }
 
-  // mode === 'new'
-  const steps = STEPS[st.kind];
-  const [field] = steps[st.step];
+  const steps = STEPS[state.kind];
+  const [field] = steps[state.step];
   if (field === "file") {
-    const [fileId, fileType] = extractFile(msg);
+    const [fileId, fileType] = extractFile(message);
     if (fileId) {
-      st.data.file_id = fileId;
-      st.data.file_type = fileType;
-    } else if ((msg.text || "").trim() !== "تخطي") {
+      state.data.file_id = fileId;
+      state.data.file_type = fileType;
+    } else if ((message.text || "").trim() !== "تخطي") {
       return ctx.reply("أرسل ملفاً أو صورة، أو اكتب: تخطي");
     }
   } else {
-    if (!msg.text) return ctx.reply("أرسل نصاً من فضلك.");
-    const val = msg.text.trim();
-    st.data[field] = OPTIONAL.has(field) && val === "تخطي" ? null : val;
+    if (typeof message.text !== "string")
+      return ctx.reply("أرسل نصاً من فضلك.");
+    const value = message.text.trim();
+    if (!value && !OPTIONAL.has(field))
+      return ctx.reply("لا يمكن ترك هذا الحقل فارغاً.");
+    state.data[field] =
+      OPTIONAL.has(field) && value === "تخطي" ? null : value;
   }
 
-  st.step += 1;
-  if (st.step < steps.length) return ctx.reply(steps[st.step][1]);
+  state.step += 1;
+  if (state.step < steps.length) return ctx.reply(steps[state.step][1]);
 
-  const data = { ...st.data };
-  if (st.kind !== "cases") data.case_id = st.caseId;
-  const name = [ctx.from.first_name, ctx.from.last_name]
+  const data = { ...state.data };
+  if (state.kind !== "cases") data.case_id = state.caseId;
+  const createdBy = [ctx.from.first_name, ctx.from.last_name]
     .filter(Boolean)
     .join(" ");
-  const newId = await db.add(st.kind, name, data);
+  const newId = await db.add(state.kind, createdBy, data);
   states.delete(ctx.from.id);
-  const target = st.kind === "cases" ? `case:${newId}` : `case:${st.caseId}`;
+  const target =
+    state.kind === "cases" ? `case:${newId}` : `case:${state.caseId}`;
   await ctx.reply(
-    `✅ تم حفظ ${SINGLE[st.kind]} بنجاح.`,
+    `✅ تم حفظ ${SINGLE[state.kind]} بنجاح.`,
     Markup.inlineKeyboard([
       [Markup.button.callback("📂 فتح القضية", target)],
       backRow(),
@@ -318,18 +332,21 @@ bot.on("message", async (ctx) => {
   );
 });
 
-bot.catch((err, ctx) => {
-  console.error("Bot error:", err);
-  ctx.reply("⚠️ حدث خطأ غير متوقع، حاول مرة أخرى.").catch(() => {});
+bot.catch((error, ctx) => {
+  console.error("Bot error:", error);
+  return ctx.reply("⚠️ حدث خطأ غير متوقع، حاول مرة أخرى.").catch((replyError) => {
+    console.error("Failed to notify user:", replyError);
+  });
 });
 
 (async () => {
-  if (!ALLOWED.size)
-    console.log("ALLOWED_IDS فارغ: البوت مفتوح لجميع المستخدمين.");
   await db.init();
   await bot.launch();
   console.log("Bot is running...");
-})();
+})().catch((error) => {
+  console.error("Failed to start bot:", error);
+  process.exitCode = 1;
+});
 
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
