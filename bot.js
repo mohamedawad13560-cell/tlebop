@@ -1,4 +1,5 @@
 require("dotenv").config();
+const http = require("node:http");
 const { Telegraf, Markup } = require("telegraf");
 const db = require("./db");
 
@@ -49,6 +50,40 @@ const STEPS = {
 
 const states = new Map();
 const bot = new Telegraf(TOKEN);
+let healthServer;
+
+async function startHealthServer() {
+  if (!process.env.PORT) return;
+
+  const port = Number(process.env.PORT);
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    throw new Error("PORT must be a valid TCP port");
+
+  healthServer = http.createServer((req, res) => {
+    if (req.method !== "GET" || (req.url !== "/" && req.url !== "/health")) {
+      res.writeHead(404);
+      return res.end("Not found");
+    }
+
+    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Bot is running\n");
+  });
+
+  await new Promise((resolve, reject) => {
+    const onError = (error) => {
+      healthServer.removeListener("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      healthServer.removeListener("error", onError);
+      resolve();
+    };
+
+    healthServer.once("error", onError);
+    healthServer.once("listening", onListening);
+    healthServer.listen(port, "0.0.0.0");
+  });
+}
 
 const fmtDate = (date) => new Date(date).toLocaleString("en-GB");
 
@@ -340,13 +375,30 @@ bot.catch((error, ctx) => {
 });
 
 (async () => {
+  await startHealthServer();
   await db.init();
   await bot.launch();
   console.log("Bot is running...");
 })().catch((error) => {
   console.error("Failed to start bot:", error);
+  if (healthServer && healthServer.listening)
+    healthServer.close(() => {});
+  db.close().catch((closeError) => {
+    console.error("Failed to close database pool:", closeError);
+  });
   process.exitCode = 1;
 });
 
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    bot.stop(signal);
+    const closeServer =
+      healthServer && healthServer.listening
+        ? new Promise((resolve) => healthServer.close(resolve))
+        : Promise.resolve();
+    Promise.all([closeServer, db.close()]).catch((error) => {
+      console.error("Failed to shut down cleanly:", error);
+      process.exitCode = 1;
+    });
+  });
+}

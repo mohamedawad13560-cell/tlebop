@@ -176,6 +176,7 @@ async function search(text, perKind = 8) {
 
 module.exports = {
   init,
+  close: () => pool.end(),
   add,
   get,
   list,
