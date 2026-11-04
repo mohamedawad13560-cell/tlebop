@@ -78,6 +78,43 @@ const states = new Map();
 const bot = new Telegraf(TOKEN);
 let healthServer;
 
+bot.command("testnotify", async (ctx) => {
+  if (ctx.chat?.type !== "private" || ctx.from.id.toString() !== ADMIN_ID)
+    return ctx.reply("هذا الأمر مخصص للأدمن ويُستخدم في المحادثة الخاصة مع البوت.");
+  try {
+    const destination = await ctx.telegram.getChat(ADMIN_CHAT_ID);
+    if (destination.type !== "channel")
+      return ctx.reply(
+        `وجهة الإشعارات ليست قناة (النوع: ${destination.type}). تحقق من ADMIN_GROUP_ID.`,
+      );
+    const botMember = await ctx.telegram.getChatMember(
+      destination.id,
+      ctx.botInfo.id,
+    );
+    if (
+      !["administrator", "creator"].includes(botMember.status) ||
+      botMember.can_post_messages === false
+    ) {
+      return ctx.reply(
+        "البوت ليس مشرفاً في القناة أو لا يملك صلاحية نشر الرسائل.",
+      );
+    }
+    await ctx.telegram.sendMessage(
+      destination.id,
+      "✅ إشعارات بوت التحقيق تعمل بنجاح.",
+    );
+    return ctx.reply(`تم إرسال رسالة الاختبار إلى قناة «${destination.title}».`);
+  } catch (error) {
+    const description =
+      error.response?.description || error.message || "خطأ غير معروف";
+    const code = error.response?.error_code
+      ? ` (Telegram ${error.response.error_code})`
+      : "";
+    console.error(`فشل اختبار إشعار قناة الأدمن${code}: ${description}`);
+    return ctx.reply(`تعذر إرسال رسالة الاختبار${code}: ${description}`);
+  }
+});
+
 async function startHealthServer() {
   if (process.env.PORT === undefined || process.env.PORT === "") return;
   const port = Number(process.env.PORT);
@@ -344,43 +381,6 @@ bot.command("cancel", async (ctx) => {
     "تم الإلغاء.",
     Markup.inlineKeyboard(mainMenuRows(ctx.state.user.role === "admin")),
   );
-});
-
-bot.command("testnotify", async (ctx) => {
-  if (ctx.chat?.type !== "private" || ctx.from.id.toString() !== ADMIN_ID)
-    return ctx.reply("هذا الأمر مخصص للأدمن.");
-  try {
-    const destination = await ctx.telegram.getChat(ADMIN_CHAT_ID);
-    if (destination.type !== "channel")
-      return ctx.reply(
-        `وجهة الإشعارات ليست قناة (النوع: ${destination.type}). تحقق من ADMIN_CHANNEL_ID.`,
-      );
-    const botMember = await ctx.telegram.getChatMember(
-      destination.id,
-      ctx.botInfo.id,
-    );
-    if (
-      !["administrator", "creator"].includes(botMember.status) ||
-      botMember.can_post_messages === false
-    ) {
-      return ctx.reply(
-        "البوت ليس مشرفاً في القناة أو لا يملك صلاحية نشر الرسائل.",
-      );
-    }
-    await ctx.telegram.sendMessage(
-      destination.id,
-      "✅ إشعارات بوت التحقيق تعمل بنجاح.",
-    );
-    return ctx.reply(`تم إرسال رسالة الاختبار إلى قناة «${destination.title}».`);
-  } catch (error) {
-    const description =
-      error.response?.description || error.message || "خطأ غير معروف";
-    const code = error.response?.error_code
-      ? ` (Telegram ${error.response.error_code})`
-      : "";
-    console.error(`فشل اختبار إشعار قناة الأدمن${code}: ${description}`);
-    return ctx.reply(`تعذر إرسال رسالة الاختبار${code}: ${description}`);
-  }
 });
 
 bot.on("callback_query", async (ctx) => {
