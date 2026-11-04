@@ -22,7 +22,20 @@ const SINGLE = {
   independent_accounts: "حساب مشبوه",
 };
 
-const OPTIONAL = new Set(["fake_account", "suspect_name", "file"]);
+const ADD_ACTIONS = {
+  cases: "إضافة قضية جديدة",
+  suspects: "إضافة مشتبه به جديد",
+  evidence: "إضافة دليل جديد",
+  reports: "إضافة تقرير جديد",
+  independent_accounts: "إضافة حساب مشبوه جديد",
+};
+
+const OPTIONAL = new Set([
+  "fake_account",
+  "suspect_name",
+  "text_evidence",
+  "file",
+]);
 const KINDS = Object.keys(LABELS);
 
 const STEPS = {
@@ -57,13 +70,33 @@ const bot = new Telegraf(TOKEN);
 let healthServer;
 
 async function startHealthServer() {
-  if (!process.env.PORT) return;
+  if (process.env.PORT === undefined || process.env.PORT === "") return;
   const port = Number(process.env.PORT);
+  if (!Number.isInteger(port) || port < 0 || port > 65535)
+    throw new Error("PORT must be a valid TCP port");
   healthServer = http.createServer((req, res) => {
+    const path = new URL(req.url, "http://localhost").pathname;
+    if (path !== "/" && path !== "/health") {
+      res.writeHead(404);
+      res.end("Not found\n");
+      return;
+    }
     res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("Bot is running\n");
   });
-  await new Promise((resolve) => healthServer.listen(port, "0.0.0.0", resolve));
+  await new Promise((resolve, reject) => {
+    const onError = (error) => {
+      healthServer.removeListener("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      healthServer.removeListener("error", onError);
+      resolve();
+    };
+    healthServer.once("error", onError);
+    healthServer.once("listening", onListening);
+    healthServer.listen(port, "0.0.0.0");
+  });
 }
 
 const fmtDate = (date) => new Date(date).toLocaleString("en-GB");
@@ -240,28 +273,51 @@ function extractFile(message) {
   return [null, null];
 }
 
-// فحص التسجيل الدائم والصلاحيات لكل رسالة أو تفاعل
+// فحص تسجيل المستخدم وصلاحياته لكل رسالة أو تفاعل.
 bot.use(async (ctx, next) => {
   if (!ctx.from) return;
   let user = await db.getUser(ctx.from.id);
+
+  const name = [ctx.from.first_name, ctx.from.last_name]
+    .filter(Boolean)
+    .join(" ");
+  const adminId = process.env.ADMIN_TELEGRAM_ID;
+
   if (!user) {
-    const name = [ctx.from.first_name, ctx.from.last_name]
-      .filter(Boolean)
-      .join(" ");
-    // صلاحية المشرف تُمنح فقط للمعرّف المحدد في ADMIN_TELEGRAM_ID.
-    const role =
-      ctx.from.id.toString() === process.env.ADMIN_TELEGRAM_ID
-        ? "admin"
-        : "member";
+    const role = ctx.from.id.toString() === adminId ? "admin" : "member";
     await db.registerUser(ctx.from.id, name, role);
     user = await db.getUser(ctx.from.id);
   }
+
+  if (adminId && ctx.from.id.toString() === adminId) {
+    user.role = "admin";
+  }
+
   ctx.state.user = user;
   return next();
 });
 
 bot.start(async (ctx) => {
   states.delete(ctx.from.id);
+  const adminId = process.env.ADMIN_TELEGRAM_ID;
+  if (adminId && ctx.from.id.toString() !== adminId) {
+    const name = [ctx.from.first_name, ctx.from.last_name]
+      .filter(Boolean)
+      .join(" ");
+    const username = ctx.from.username ? `@${ctx.from.username}` : "لا يوجد";
+    try {
+      await ctx.telegram.sendMessage(
+        adminId,
+        `🚨 تنبيه دخول مستخدم إلى البوت\n\n` +
+          `👤 الاسم: ${name}\n` +
+          `🔗 اليوزر: ${username}\n` +
+          `🆔 الآي دي (Telegram ID): ${ctx.from.id}\n` +
+          `🕒 الوقت والتاريخ: ${new Date().toLocaleString("en-GB")}`,
+      );
+    } catch (err) {
+      console.error("فشل إرسال تنبيه الدخول للأدمن:", err);
+    }
+  }
   await showMenu(ctx, ctx.state.user);
 });
 
@@ -295,7 +351,6 @@ bot.on("callback_query", async (ctx) => {
   )
     return showItem(ctx, arg, Number(value), user);
 
-  // صلاحيات الأدمن فقط للتعديل والحذف
   if (action === "toggle" && user.role === "admin" && /^\d+$/.test(arg || "")) {
     const id = Number(arg);
     const record = await db.get("cases", id);
@@ -394,6 +449,26 @@ bot.on("message", async (ctx) => {
   const newId = await db.add(state.kind, createdBy, data);
   states.delete(ctx.from.id);
 
+  const adminId = process.env.ADMIN_TELEGRAM_ID;
+  if (adminId) {
+    const name =
+      [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") ||
+      user.name ||
+      "غير معروف";
+    const username = ctx.from.username ? `@${ctx.from.username}` : "غير متوفر";
+    try {
+      await ctx.telegram.sendMessage(
+        adminId,
+        `📢 تم ${ADD_ACTIONS[state.kind]}\n\n` +
+          `👤 اسم المستخدم: ${name}\n` +
+          `🔗 اسم الحساب: ${username}\n` +
+          `🆔 Telegram ID: ${ctx.from.id}`,
+      );
+    } catch (error) {
+      console.error("فشل إرسال إشعار إضافة سجل للأدمن:", error);
+    }
+  }
+
   const target =
     state.kind === "cases"
       ? `case:${newId}`
@@ -415,10 +490,25 @@ bot.catch((error, ctx) => {
 });
 
 (async () => {
-  await startHealthServer();
-  await db.init();
-  await bot.launch();
-  console.log("Bot is running securely with Roles...");
+  let botStarted = false;
+  try {
+    await db.init();
+    await bot.launch();
+    botStarted = true;
+    await startHealthServer();
+    console.log("Bot is running securely with User Tracking & Roles...");
+  } catch (error) {
+    if (botStarted) bot.stop();
+    if (healthServer && healthServer.listening) {
+      await new Promise((resolve) => healthServer.close(resolve));
+    }
+    try {
+      await db.close();
+    } catch (closeError) {
+      console.error("Failed to close database after startup error:", closeError);
+    }
+    throw error;
+  }
 })().catch((error) => {
   console.error("Failed to start bot:", error);
   process.exitCode = 1;
