@@ -5,6 +5,9 @@ const db = require("./db");
 
 const TOKEN = process.env.BOT_TOKEN;
 if (!TOKEN) throw new Error("BOT_TOKEN مفقود في ملف .env");
+const ADMIN_ID = process.env.ADMIN_TELEGRAM_ID;
+if (!ADMIN_ID || !/^[1-9]\d*$/.test(ADMIN_ID))
+  throw new Error("ADMIN_TELEGRAM_ID مفقود أو غير صالح في ملف .env");
 
 const LABELS = {
   cases: "📁 القضايا",
@@ -281,15 +284,13 @@ bot.use(async (ctx, next) => {
   const name = [ctx.from.first_name, ctx.from.last_name]
     .filter(Boolean)
     .join(" ");
-  const adminId = process.env.ADMIN_TELEGRAM_ID;
-
   if (!user) {
-    const role = ctx.from.id.toString() === adminId ? "admin" : "member";
+    const role = ctx.from.id.toString() === ADMIN_ID ? "admin" : "member";
     await db.registerUser(ctx.from.id, name, role);
     user = await db.getUser(ctx.from.id);
   }
 
-  if (adminId && ctx.from.id.toString() === adminId) {
+  if (ctx.from.id.toString() === ADMIN_ID) {
     user.role = "admin";
   }
 
@@ -299,15 +300,14 @@ bot.use(async (ctx, next) => {
 
 bot.start(async (ctx) => {
   states.delete(ctx.from.id);
-  const adminId = process.env.ADMIN_TELEGRAM_ID;
-  if (adminId && ctx.from.id.toString() !== adminId) {
+  if (ctx.from.id.toString() !== ADMIN_ID) {
     const name = [ctx.from.first_name, ctx.from.last_name]
       .filter(Boolean)
       .join(" ");
     const username = ctx.from.username ? `@${ctx.from.username}` : "لا يوجد";
     try {
       await ctx.telegram.sendMessage(
-        adminId,
+        ADMIN_ID,
         `🚨 تنبيه دخول مستخدم إلى البوت\n\n` +
           `👤 الاسم: ${name}\n` +
           `🔗 اليوزر: ${username}\n` +
@@ -449,24 +449,21 @@ bot.on("message", async (ctx) => {
   const newId = await db.add(state.kind, createdBy, data);
   states.delete(ctx.from.id);
 
-  const adminId = process.env.ADMIN_TELEGRAM_ID;
-  if (adminId) {
-    const name =
-      [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") ||
-      user.name ||
-      "غير معروف";
-    const username = ctx.from.username ? `@${ctx.from.username}` : "غير متوفر";
-    try {
-      await ctx.telegram.sendMessage(
-        adminId,
-        `📢 تم ${ADD_ACTIONS[state.kind]}\n\n` +
-          `👤 اسم المستخدم: ${name}\n` +
-          `🔗 اسم الحساب: ${username}\n` +
-          `🆔 Telegram ID: ${ctx.from.id}`,
-      );
-    } catch (error) {
-      console.error("فشل إرسال إشعار إضافة سجل للأدمن:", error);
-    }
+  const name =
+    [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") ||
+    user.name ||
+    "غير معروف";
+  const username = ctx.from.username ? `@${ctx.from.username}` : "غير متوفر";
+  try {
+    await ctx.telegram.sendMessage(
+      ADMIN_ID,
+      `📢 تم ${ADD_ACTIONS[state.kind]}\n\n` +
+        `👤 اسم المستخدم: ${name}\n` +
+        `🔗 اسم الحساب: ${username}\n` +
+        `🆔 Telegram ID: ${ctx.from.id}`,
+    );
+  } catch (error) {
+    console.error("فشل إرسال إشعار إضافة سجل للأدمن:", error);
   }
 
   const target =
