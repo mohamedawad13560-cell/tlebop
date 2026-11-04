@@ -1,4 +1,4 @@
-// طبقة قاعدة البيانات (MySQL) لبوت قسم التحقيق
+// طبقة قاعدة البيانات (MySQL) لبوت قسم التحقيق (محدثة)
 const mysql = require("mysql2/promise");
 
 const pool = mysql.createPool({
@@ -13,6 +13,12 @@ const pool = mysql.createPool({
 });
 
 const SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS users (
+    telegram_id BIGINT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    role VARCHAR(20) NOT NULL DEFAULT 'member',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   `CREATE TABLE IF NOT EXISTS cases (
     id INT AUTO_INCREMENT PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
@@ -29,7 +35,7 @@ const SCHEMA = [
     details TEXT,
     created_by VARCHAR(255),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (case_id) REFERENCES cases(id)
+    FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   `CREATE TABLE IF NOT EXISTS evidence (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -39,7 +45,7 @@ const SCHEMA = [
     file_type VARCHAR(20),
     created_by VARCHAR(255),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (case_id) REFERENCES cases(id)
+    FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   `CREATE TABLE IF NOT EXISTS reports (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -48,48 +54,67 @@ const SCHEMA = [
     body TEXT,
     created_by VARCHAR(255),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (case_id) REFERENCES cases(id)
+    FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-  `CREATE TABLE IF NOT EXISTS accounts (
+  `CREATE TABLE IF NOT EXISTS independent_accounts (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    case_id INT NOT NULL,
-    platform VARCHAR(100) NOT NULL,
-    username VARCHAR(255) NOT NULL,
-    details TEXT,
+    account_name VARCHAR(255) NOT NULL,
+    account_link VARCHAR(255) NOT NULL,
+    suspect_name VARCHAR(255),
+    text_evidence TEXT,
+    file_id VARCHAR(255),
+    file_type VARCHAR(20),
     created_by VARCHAR(255),
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (case_id) REFERENCES cases(id)
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 ];
 
-// قائمة بيضاء للجداول والأعمدة (لمنع حقن أسماء الجداول)
 const COLS = {
   cases: ["title", "description"],
   suspects: ["case_id", "name", "fake_account", "details"],
   evidence: ["case_id", "description", "file_id", "file_type"],
   reports: ["case_id", "title", "body"],
-  accounts: ["case_id", "platform", "username", "details"],
+  independent_accounts: [
+    "account_name",
+    "account_link",
+    "suspect_name",
+    "text_evidence",
+    "file_id",
+    "file_type",
+  ],
 };
+
 const SEARCH_COLS = {
   cases: ["title", "description"],
   suspects: ["name", "fake_account", "details"],
   evidence: ["description"],
   reports: ["title", "body"],
-  accounts: ["platform", "username", "details"],
+  independent_accounts: [
+    "account_name",
+    "account_link",
+    "suspect_name",
+    "text_evidence",
+  ],
 };
 
 const caseNo = (id) => `C-${String(id).padStart(4, "0")}`;
 
 async function init() {
   for (const sql of SCHEMA) await pool.query(sql);
-  // ترقية قواعد البيانات القديمة: إضافة عمود الحساب الوهمي إن لم يكن موجوداً
-  try {
-    await pool.query(
-      "ALTER TABLE suspects ADD COLUMN fake_account VARCHAR(255) NULL AFTER name",
-    );
-  } catch (e) {
-    if (e.code !== "ER_DUP_FIELDNAME") throw e;
-  }
+}
+
+async function getUser(telegramId) {
+  const [rows] = await pool.query("SELECT * FROM users WHERE telegram_id = ?", [
+    telegramId,
+  ]);
+  return rows[0] || null;
+}
+
+async function registerUser(telegramId, name, role = "member") {
+  await pool.query(
+    "INSERT INTO users (telegram_id, name, role) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE name = ?",
+    [telegramId, name, role, name],
+  );
 }
 
 async function add(kind, createdBy, fields) {
@@ -109,12 +134,9 @@ async function get(kind, id) {
   return rows[0] || null;
 }
 
-// caseId = 0 يعني كل السجلات (الأحدث أولاً)
 async function list(kind, caseId = 0, limit = 30) {
   if (!COLS[kind]) throw new Error("invalid kind");
-  if (!Number.isInteger(limit) || limit < 1)
-    throw new RangeError("limit must be a positive integer");
-  if (kind !== "cases" && caseId) {
+  if (kind !== "cases" && kind !== "independent_accounts" && caseId) {
     const [rows] = await pool.query(
       `SELECT * FROM ${kind} WHERE case_id = ? ORDER BY id DESC LIMIT ?`,
       [caseId, limit],
@@ -130,7 +152,7 @@ async function list(kind, caseId = 0, limit = 30) {
 
 async function countByCase(caseId) {
   const out = {};
-  for (const k of ["suspects", "evidence", "reports", "accounts"]) {
+  for (const k of ["suspects", "evidence", "reports"]) {
     const [r] = await pool.query(
       `SELECT COUNT(*) AS n FROM ${k} WHERE case_id = ?`,
       [caseId],
@@ -147,11 +169,14 @@ async function setStatus(caseId, status) {
   ]);
 }
 
+async function remove(kind, id) {
+  if (!COLS[kind]) throw new Error("invalid kind");
+  await pool.query(`DELETE FROM ${kind} WHERE id = ?`, [id]);
+}
+
 async function search(text, perKind = 8) {
   if (typeof text !== "string" || !text.trim())
     throw new TypeError("search text must be a non-empty string");
-  if (!Number.isInteger(perKind) || perKind < 1)
-    throw new RangeError("perKind must be a positive integer");
   const escaped = text.trim().replace(/[=%_]/g, "=$&");
   const like = `%${escaped}%`;
   const results = [];
@@ -163,7 +188,6 @@ async function search(text, perKind = 8) {
     );
     rows.forEach((r) => results.push([kind, r]));
   }
-  // البحث برقم القضية: C-0003 أو 3
   let t = text.trim().toUpperCase();
   if (t.startsWith("C-")) t = t.slice(2);
   if (/^\d+$/.test(t)) {
@@ -177,11 +201,14 @@ async function search(text, perKind = 8) {
 module.exports = {
   init,
   close: () => pool.end(),
+  getUser,
+  registerUser,
   add,
   get,
   list,
   countByCase,
   setStatus,
+  remove,
   search,
   caseNo,
 };

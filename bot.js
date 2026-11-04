@@ -11,16 +11,18 @@ const LABELS = {
   suspects: "👤 المشتبه بهم",
   evidence: "🧾 الأدلة",
   reports: "📝 التقارير",
-  accounts: "🕶️ الحسابات المشبوهة",
+  independent_accounts: "🕶️ الحسابات المشبوهة",
 };
+
 const SINGLE = {
   cases: "قضية",
   suspects: "مشتبه به",
   evidence: "دليل",
   reports: "تقرير",
-  accounts: "حساب مشبوه",
+  independent_accounts: "حساب مشبوه",
 };
-const OPTIONAL = new Set(["fake_account"]);
+
+const OPTIONAL = new Set(["fake_account", "suspect_name", "file"]);
 const KINDS = Object.keys(LABELS);
 
 const STEPS = {
@@ -41,10 +43,12 @@ const STEPS = {
     ["title", "عنوان التقرير؟"],
     ["body", "نص التقرير؟"],
   ],
-  accounts: [
-    ["platform", "المنصة؟ (تيليجرام، انستغرام، فيسبوك...)"],
-    ["username", "اسم المستخدم أو رابط الحساب؟"],
-    ["details", "ملاحظات وسبب الاشتباه؟"],
+  independent_accounts: [
+    ["account_name", "اسم الحساب المشبوه؟"],
+    ["account_link", "رابط الحساب المشبوه؟"],
+    ["suspect_name", "اسم المشتبه فيه أو رابط حسابه؟ أو اكتب: تخطي"],
+    ["text_evidence", "أدلة نصية؟ أو اكتب: تخطي"],
+    ["file", "أرسل صورة أو ملف كدليل؟ أو اكتب: تخطي"],
   ],
 };
 
@@ -54,35 +58,12 @@ let healthServer;
 
 async function startHealthServer() {
   if (!process.env.PORT) return;
-
   const port = Number(process.env.PORT);
-  if (!Number.isInteger(port) || port < 1 || port > 65535)
-    throw new Error("PORT must be a valid TCP port");
-
   healthServer = http.createServer((req, res) => {
-    if (req.method !== "GET" || (req.url !== "/" && req.url !== "/health")) {
-      res.writeHead(404);
-      return res.end("Not found");
-    }
-
     res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("Bot is running\n");
   });
-
-  await new Promise((resolve, reject) => {
-    const onError = (error) => {
-      healthServer.removeListener("listening", onListening);
-      reject(error);
-    };
-    const onListening = () => {
-      healthServer.removeListener("error", onError);
-      resolve();
-    };
-
-    healthServer.once("error", onError);
-    healthServer.once("listening", onListening);
-    healthServer.listen(port, "0.0.0.0");
-  });
+  await new Promise((resolve) => healthServer.listen(port, "0.0.0.0", resolve));
 }
 
 const fmtDate = (date) => new Date(date).toLocaleString("en-GB");
@@ -93,8 +74,8 @@ function itemTitle(kind, record) {
     return `${record.name} (${db.caseNo(record.case_id)})`;
   if (kind === "evidence")
     return `دليل #${record.id}: ${(record.description || "").slice(0, 30)}`;
-  if (kind === "accounts")
-    return `${record.platform}: ${record.username} (${db.caseNo(record.case_id)})`;
+  if (kind === "independent_accounts")
+    return `${record.account_name} (${record.account_link})`;
   return `${record.title} (${db.caseNo(record.case_id)})`;
 }
 
@@ -107,16 +88,19 @@ async function itemText(kind, record) {
     const counts = await db.countByCase(record.id);
     return (
       `📁 ${db.caseNo(record.id)} — ${record.title}\nالحالة: ${record.status}\n\n${record.description || ""}\n\n` +
-      `👤 مشتبه بهم: ${counts.suspects} | 🧾 أدلة: ${counts.evidence} | 📝 تقارير: ${counts.reports} | 🕶️ حسابات مشبوهة: ${counts.accounts}${meta}`
+      `👤 مشتبه بهم: ${counts.suspects} | 🧾 أدلة: ${counts.evidence} | 📝 تقارير: ${counts.reports}${meta}`
     );
   }
-
+  if (kind === "independent_accounts") {
+    return (
+      `🕶️ حساب مشبوه مستقل #${record.id}\nاسم الحساب: ${record.account_name}\nرابط الحساب: ${record.account_link}\n` +
+      `المشتبه فيه: ${record.suspect_name || "غير محدد"}\nأدلة نصية: ${record.text_evidence || "لا توجد"}\n` +
+      `${record.file_id ? "📎 يوجد مرفق كدليل" : "بدون مرفق"}${meta}`
+    );
+  }
   const caseLine = `القضية: ${db.caseNo(record.case_id)}\n`;
   if (kind === "suspects") {
     return `👤 ${record.name}\n${caseLine}🎭 الحساب الوهمي: ${record.fake_account || "غير محدد"}\n\n${record.details || ""}${meta}`;
-  }
-  if (kind === "accounts") {
-    return `🕶️ حساب مشبوه #${record.id}\n${caseLine}المنصة: ${record.platform}\nالحساب: ${record.username}\n\n${record.details || ""}${meta}`;
   }
   if (kind === "evidence") {
     return `🧾 دليل #${record.id}\n${caseLine}${record.file_id ? "📎 يوجد مرفق" : "بدون مرفق"}\n\n${record.description}${meta}`;
@@ -128,21 +112,28 @@ const backRow = (target = "menu") => [
   Markup.button.callback("⬅️ رجوع", target),
 ];
 
-const mainMenuRows = () => [
-  [
-    Markup.button.callback("📁 القضايا", "list:cases:0"),
-    Markup.button.callback("➕ قضية جديدة", "new:cases:0"),
-  ],
-  [
-    Markup.button.callback("👤 المشتبه بهم", "list:suspects:0"),
-    Markup.button.callback("🧾 الأدلة", "list:evidence:0"),
-  ],
-  [
-    Markup.button.callback("📝 التقارير", "list:reports:0"),
-    Markup.button.callback("🕶️ الحسابات المشبوهة", "list:accounts:0"),
-  ],
-  [Markup.button.callback("🔍 بحث", "search")],
-];
+const mainMenuRows = (isAdmin) => {
+  const rows = [
+    [
+      Markup.button.callback("📁 القضايا", "list:cases:0"),
+      Markup.button.callback("➕ قضية جديدة", "new:cases:0"),
+    ],
+    [
+      Markup.button.callback(
+        "🕶️ الحسابات المشبوهة",
+        "list:independent_accounts:0",
+      ),
+      Markup.button.callback(
+        "➕ حساب مشبوه جديد",
+        "new:independent_accounts:0",
+      ),
+    ],
+  ];
+  if (isAdmin) {
+    rows.push([Markup.button.callback("🔍 بحث شامل (أدمن)", "search")]);
+  }
+  return rows;
+};
 
 async function show(ctx, text, rows) {
   const keyboard = Markup.inlineKeyboard(rows);
@@ -158,17 +149,21 @@ async function show(ctx, text, rows) {
   }
 }
 
-const showMenu = (ctx) =>
-  show(ctx, "🕵️ بوت قسم التحقيق\nاختر القسم:", mainMenuRows());
+const showMenu = async (ctx, user) =>
+  show(
+    ctx,
+    `🕵️ بوت قسم التحقيق\nمرحباً بك: ${user.name}\nالصلاحية: ${user.role === "admin" ? "مشرف 🛡️" : "عضو 👤"}\nاختر القسم:`,
+    mainMenuRows(user.role === "admin"),
+  );
 
-async function showList(ctx, kind, caseId) {
-  if (!KINDS.includes(kind)) return showMenu(ctx);
+async function showList(ctx, kind, caseId, user) {
+  if (!KINDS.includes(kind)) return showMenu(ctx, user);
   const records = await db.list(kind, caseId);
   const buttons = records.map((record) => [
     Markup.button.callback(itemTitle(kind, record), itemCb(kind, record)),
   ]);
   let back = "menu";
-  if (kind !== "cases" && caseId) {
+  if (kind === "suspects" || kind === "evidence" || kind === "reports") {
     buttons.push([
       Markup.button.callback(
         `➕ إضافة ${SINGLE[kind]}`,
@@ -186,43 +181,53 @@ async function showList(ctx, kind, caseId) {
   );
 }
 
-async function showCase(ctx, id) {
+async function showCase(ctx, id, user) {
   const record = await db.get("cases", id);
   if (!record) return show(ctx, "القضية غير موجودة.", [backRow()]);
-  const toggle =
-    record.status === "مفتوحة" ? "🔒 إغلاق القضية" : "🔓 إعادة فتح القضية";
-  await show(ctx, await itemText("cases", record), [
+  const rows = [
     [
       Markup.button.callback("👤 المشتبه بهم", `list:suspects:${id}`),
       Markup.button.callback("🧾 الأدلة", `list:evidence:${id}`),
     ],
-    [
-      Markup.button.callback("📝 التقارير", `list:reports:${id}`),
-      Markup.button.callback("🕶️ الحسابات المشبوهة", `list:accounts:${id}`),
-    ],
-    [Markup.button.callback(toggle, `toggle:${id}`)],
-    backRow("list:cases:0"),
-  ]);
+    [Markup.button.callback("📝 التقارير", `list:reports:${id}`)],
+  ];
+  if (user.role === "admin") {
+    const toggle =
+      record.status === "مفتوحة" ? "🔒 إغلاق القضية" : "🔓 إعادة فتح القضية";
+    rows.push([Markup.button.callback(toggle, `toggle:${id}`)]);
+    rows.push([Markup.button.callback("🗑️ حذف القضية", `delete:cases:${id}`)]);
+  }
+  rows.push(backRow("list:cases:0"));
+  await show(ctx, await itemText("cases", record), rows);
 }
 
-async function showItem(ctx, kind, id) {
-  if (!KINDS.includes(kind) || kind === "cases")
-    return showMenu(ctx);
+async function showItem(ctx, kind, id, user) {
+  if (!KINDS.includes(kind) || kind === "cases") return showMenu(ctx, user);
   const record = await db.get(kind, id);
   if (!record) return show(ctx, "السجل غير موجود.", [backRow()]);
-  await show(ctx, await itemText(kind, record), [
-    backRow(`list:${kind}:${record.case_id}`),
-  ]);
-  if (kind === "evidence" && record.file_id) {
+
+  const backTarget =
+    kind === "independent_accounts"
+      ? "list:independent_accounts:0"
+      : `list:${kind}:${record.case_id}`;
+  const rows = [backRow(backTarget)];
+  if (user.role === "admin") {
+    rows.unshift([Markup.button.callback("🗑️ حذف", `delete:${kind}:${id}`)]);
+  }
+
+  await show(ctx, await itemText(kind, record), rows);
+
+  const fileId = record.file_id;
+  if (fileId) {
     const senders = {
       photo: "replyWithPhoto",
+      document: "replyWithDocument",
       video: "replyWithVideo",
       voice: "replyWithVoice",
       audio: "replyWithAudio",
-      document: "replyWithDocument",
     };
     const send = ctx[senders[record.file_type] || "replyWithDocument"];
-    await send.call(ctx, record.file_id);
+    await send.call(ctx, fileId);
   }
 }
 
@@ -235,14 +240,37 @@ function extractFile(message) {
   return [null, null];
 }
 
+// فحص التسجيل الدائم والصلاحيات لكل رسالة أو تفاعل
+bot.use(async (ctx, next) => {
+  if (!ctx.from) return;
+  let user = await db.getUser(ctx.from.id);
+  if (!user) {
+    const name = [ctx.from.first_name, ctx.from.last_name]
+      .filter(Boolean)
+      .join(" ");
+    // صلاحية المشرف تُمنح فقط للمعرّف المحدد في ADMIN_TELEGRAM_ID.
+    const role =
+      ctx.from.id.toString() === process.env.ADMIN_TELEGRAM_ID
+        ? "admin"
+        : "member";
+    await db.registerUser(ctx.from.id, name, role);
+    user = await db.getUser(ctx.from.id);
+  }
+  ctx.state.user = user;
+  return next();
+});
+
 bot.start(async (ctx) => {
   states.delete(ctx.from.id);
-  await showMenu(ctx);
+  await showMenu(ctx, ctx.state.user);
 });
 
 bot.command("cancel", async (ctx) => {
   states.delete(ctx.from.id);
-  await ctx.reply("تم الإلغاء.", Markup.inlineKeyboard(mainMenuRows()));
+  await ctx.reply(
+    "تم الإلغاء.",
+    Markup.inlineKeyboard(mainMenuRows(ctx.state.user.role === "admin")),
+  );
 });
 
 bot.on("callback_query", async (ctx) => {
@@ -251,37 +279,45 @@ bot.on("callback_query", async (ctx) => {
   if (typeof callback !== "string") return;
   const [action, arg, value] = callback.split(":");
   const userId = ctx.from.id;
+  const user = ctx.state.user;
   states.delete(userId);
 
-  if (action === "menu") return showMenu(ctx);
+  if (action === "menu") return showMenu(ctx, user);
   if (action === "list" && KINDS.includes(arg) && /^\d+$/.test(value || ""))
-    return showList(ctx, arg, Number(value));
+    return showList(ctx, arg, Number(value), user);
   if (action === "case" && /^\d+$/.test(arg || ""))
-    return showCase(ctx, Number(arg));
+    return showCase(ctx, Number(arg), user);
   if (
     action === "item" &&
     KINDS.includes(arg) &&
     arg !== "cases" &&
     /^\d+$/.test(value || "")
-  ) {
-    return showItem(ctx, arg, Number(value));
-  }
-  if (action === "toggle" && /^\d+$/.test(arg || "")) {
+  )
+    return showItem(ctx, arg, Number(value), user);
+
+  // صلاحيات الأدمن فقط للتعديل والحذف
+  if (action === "toggle" && user.role === "admin" && /^\d+$/.test(arg || "")) {
     const id = Number(arg);
     const record = await db.get("cases", id);
     if (record)
-      await db.setStatus(
-        id,
-        record.status === "مفتوحة" ? "مغلقة" : "مفتوحة",
-      );
-    return showCase(ctx, id);
+      await db.setStatus(id, record.status === "مفتوحة" ? "مغلقة" : "مفتوحة");
+    return showCase(ctx, id, user);
   }
+
   if (
-    action === "new" &&
+    action === "delete" &&
+    user.role === "admin" &&
     KINDS.includes(arg) &&
-    /^\d+$/.test(value || "") &&
-    (arg === "cases" || Number(value) > 0)
+    /^\d+$/.test(value || "")
   ) {
+    await db.remove(arg, Number(value));
+    return ctx.reply(
+      "🗑️ تم الحذف بنجاح.",
+      Markup.inlineKeyboard(mainMenuRows(user.role === "admin")),
+    );
+  }
+
+  if (action === "new" && KINDS.includes(arg) && /^\d+$/.test(value || "")) {
     const kind = arg;
     states.set(userId, {
       mode: "new",
@@ -294,10 +330,11 @@ bot.on("callback_query", async (ctx) => {
       `➕ ${SINGLE[kind]} جديد\n\n${STEPS[kind][0][1]}\n\n(/cancel للإلغاء)`,
     );
   }
-  if (action === "search") {
+
+  if (action === "search" && user.role === "admin") {
     states.set(userId, { mode: "search" });
     return ctx.reply(
-      "🔍 اكتب كلمة البحث (اسم، رقم قضية، وصف...)\n\n(/cancel للإلغاء)",
+      "🔍 اكتب كلمة البحث الشاملة (اسم، يوزر، قضية، وصف...)\n\n(/cancel للإلغاء)",
     );
   }
 });
@@ -306,9 +343,10 @@ bot.on("message", async (ctx) => {
   const message = ctx.message;
   if (message.text && message.text.startsWith("/")) return;
   const state = states.get(ctx.from.id);
-  if (!state) return showMenu(ctx);
+  const user = ctx.state.user;
+  if (!state) return showMenu(ctx, user);
 
-  if (state.mode === "search") {
+  if (state.mode === "search" && user.role === "admin") {
     const text = (message.text || "").trim();
     if (!text) return ctx.reply("اكتب نصاً للبحث.");
     states.delete(ctx.from.id);
@@ -328,40 +366,44 @@ bot.on("message", async (ctx) => {
 
   const steps = STEPS[state.kind];
   const [field] = steps[state.step];
+
   if (field === "file") {
     const [fileId, fileType] = extractFile(message);
     if (fileId) {
       state.data.file_id = fileId;
       state.data.file_type = fileType;
     } else if ((message.text || "").trim() !== "تخطي") {
-      return ctx.reply("أرسل ملفاً أو صورة، أو اكتب: تخطي");
+      return ctx.reply("أرسل ملفاً أو صورة كدليل، أو اكتب: تخطي");
     }
   } else {
     if (typeof message.text !== "string")
       return ctx.reply("أرسل نصاً من فضلك.");
-    const value = message.text.trim();
-    if (!value && !OPTIONAL.has(field))
+    const val = message.text.trim();
+    if (!val && !OPTIONAL.has(field))
       return ctx.reply("لا يمكن ترك هذا الحقل فارغاً.");
-    state.data[field] =
-      OPTIONAL.has(field) && value === "تخطي" ? null : value;
+    state.data[field] = OPTIONAL.has(field) && val === "تخطي" ? null : val;
   }
 
   state.step += 1;
   if (state.step < steps.length) return ctx.reply(steps[state.step][1]);
 
   const data = { ...state.data };
-  if (state.kind !== "cases") data.case_id = state.caseId;
-  const createdBy = [ctx.from.first_name, ctx.from.last_name]
-    .filter(Boolean)
-    .join(" ");
+  if (state.kind !== "cases" && state.kind !== "independent_accounts")
+    data.case_id = state.caseId;
+  const createdBy = user.name;
   const newId = await db.add(state.kind, createdBy, data);
   states.delete(ctx.from.id);
+
   const target =
-    state.kind === "cases" ? `case:${newId}` : `case:${state.caseId}`;
+    state.kind === "cases"
+      ? `case:${newId}`
+      : state.kind === "independent_accounts"
+        ? `item:independent_accounts:${newId}`
+        : `case:${state.caseId}`;
   await ctx.reply(
     `✅ تم حفظ ${SINGLE[state.kind]} بنجاح.`,
     Markup.inlineKeyboard([
-      [Markup.button.callback("📂 فتح القضية", target)],
+      [Markup.button.callback("📂 استعراض السجل", target)],
       backRow(),
     ]),
   );
@@ -369,36 +411,15 @@ bot.on("message", async (ctx) => {
 
 bot.catch((error, ctx) => {
   console.error("Bot error:", error);
-  return ctx.reply("⚠️ حدث خطأ غير متوقع، حاول مرة أخرى.").catch((replyError) => {
-    console.error("Failed to notify user:", replyError);
-  });
+  return ctx.reply("⚠️ حدث خطأ غير متوقع، حاول مرة أخرى.");
 });
 
 (async () => {
   await startHealthServer();
   await db.init();
   await bot.launch();
-  console.log("Bot is running...");
+  console.log("Bot is running securely with Roles...");
 })().catch((error) => {
   console.error("Failed to start bot:", error);
-  if (healthServer && healthServer.listening)
-    healthServer.close(() => {});
-  db.close().catch((closeError) => {
-    console.error("Failed to close database pool:", closeError);
-  });
   process.exitCode = 1;
 });
-
-for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.once(signal, () => {
-    bot.stop(signal);
-    const closeServer =
-      healthServer && healthServer.listening
-        ? new Promise((resolve) => healthServer.close(resolve))
-        : Promise.resolve();
-    Promise.all([closeServer, db.close()]).catch((error) => {
-      console.error("Failed to shut down cleanly:", error);
-      process.exitCode = 1;
-    });
-  });
-}
