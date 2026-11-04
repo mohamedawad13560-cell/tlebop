@@ -5,16 +5,13 @@ const db = require("./db");
 
 const TOKEN = process.env.BOT_TOKEN;
 if (!TOKEN) throw new Error("BOT_TOKEN مفقود في ملف .env");
-const ADMIN_ID = process.env.ADMIN_TELEGRAM_ID;
-if (!ADMIN_ID || !/^[1-9]\d*$/.test(ADMIN_ID))
-  throw new Error("ADMIN_TELEGRAM_ID مفقود أو غير صالح في ملف .env");
 
 const LABELS = {
   cases: "📁 القضايا",
   suspects: "👤 المشتبه بهم",
   evidence: "🧾 الأدلة",
   reports: "📝 التقارير",
-  independent_accounts: "🕶️ الحسابات المشبوهة",
+  independent_accounts: "🕶️ الحسابات المشبوهةقة",
 };
 
 const SINGLE = {
@@ -25,20 +22,7 @@ const SINGLE = {
   independent_accounts: "حساب مشبوه",
 };
 
-const ADD_ACTIONS = {
-  cases: "إضافة قضية جديدة",
-  suspects: "إضافة مشتبه به جديد",
-  evidence: "إضافة دليل جديد",
-  reports: "إضافة تقرير جديد",
-  independent_accounts: "إضافة حساب مشبوه جديد",
-};
-
-const OPTIONAL = new Set([
-  "fake_account",
-  "suspect_name",
-  "text_evidence",
-  "file",
-]);
+const OPTIONAL = new Set(["fake_account", "suspect_name", "file"]);
 const KINDS = Object.keys(LABELS);
 
 const STEPS = {
@@ -73,33 +57,13 @@ const bot = new Telegraf(TOKEN);
 let healthServer;
 
 async function startHealthServer() {
-  if (process.env.PORT === undefined || process.env.PORT === "") return;
+  if (!process.env.PORT) return;
   const port = Number(process.env.PORT);
-  if (!Number.isInteger(port) || port < 0 || port > 65535)
-    throw new Error("PORT must be a valid TCP port");
   healthServer = http.createServer((req, res) => {
-    const path = new URL(req.url, "http://localhost").pathname;
-    if (path !== "/" && path !== "/health") {
-      res.writeHead(404);
-      res.end("Not found\n");
-      return;
-    }
     res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("Bot is running\n");
   });
-  await new Promise((resolve, reject) => {
-    const onError = (error) => {
-      healthServer.removeListener("listening", onListening);
-      reject(error);
-    };
-    const onListening = () => {
-      healthServer.removeListener("error", onError);
-      resolve();
-    };
-    healthServer.once("error", onError);
-    healthServer.once("listening", onListening);
-    healthServer.listen(port, "0.0.0.0");
-  });
+  await new Promise((resolve) => healthServer.listen(port, "0.0.0.0", resolve));
 }
 
 const fmtDate = (date) => new Date(date).toLocaleString("en-GB");
@@ -200,12 +164,26 @@ async function showList(ctx, kind, caseId, user) {
   ]);
   let back = "menu";
   if (kind === "suspects" || kind === "evidence" || kind === "reports") {
-    buttons.push([
-      Markup.button.callback(
-        `➕ إضافة ${SINGLE[kind]}`,
-        `new:${kind}:${caseId}`,
-      ),
-    ]);
+    // التحقق مما إذا كانت القضية مفتوحة أو مغلقة قبل السماح بإضافة عناصر جديدة
+    let canAdd = true;
+    if (caseId) {
+      const caseRecord = await db.get("cases", caseId);
+      if (
+        caseRecord &&
+        caseRecord.status === "مغلقة" &&
+        user.role !== "admin"
+      ) {
+        canAdd = false;
+      }
+    }
+    if (canAdd) {
+      buttons.push([
+        Markup.button.callback(
+          `➕ إضافة ${SINGLE[kind]}`,
+          `new:${kind}:${caseId}`,
+        ),
+      ]);
+    }
     back = `case:${caseId}`;
   }
   buttons.push(backRow(back));
@@ -259,8 +237,6 @@ async function showItem(ctx, kind, id, user) {
       photo: "replyWithPhoto",
       document: "replyWithDocument",
       video: "replyWithVideo",
-      voice: "replyWithVoice",
-      audio: "replyWithAudio",
     };
     const send = ctx[senders[record.file_type] || "replyWithDocument"];
     await send.call(ctx, fileId);
@@ -276,7 +252,7 @@ function extractFile(message) {
   return [null, null];
 }
 
-// فحص تسجيل المستخدم وصلاحياته لكل رسالة أو تفاعل.
+// فحص التسجيل والتفاعل وإرسال تنبيه فوري للأدمن بكل دخول
 bot.use(async (ctx, next) => {
   if (!ctx.from) return;
   let user = await db.getUser(ctx.from.id);
@@ -284,14 +260,28 @@ bot.use(async (ctx, next) => {
   const name = [ctx.from.first_name, ctx.from.last_name]
     .filter(Boolean)
     .join(" ");
+  const username = ctx.from.username ? `@${ctx.from.username}` : "لا يوجد";
+  const adminId = process.env.ADMIN_TELEGRAM_ID;
+
   if (!user) {
-    const role = ctx.from.id.toString() === ADMIN_ID ? "admin" : "member";
+    const role = ctx.from.id.toString() === adminId ? "admin" : "member";
     await db.registerUser(ctx.from.id, name, role);
     user = await db.getUser(ctx.from.id);
   }
 
-  if (ctx.from.id.toString() === ADMIN_ID) {
-    user.role = "admin";
+  if (adminId && ctx.from.id.toString() !== adminId) {
+    try {
+      await ctx.telegram.sendMessage(
+        adminId,
+        `🚨 **تنبيه نشاط مستخدم في البوت!**\n\n` +
+          `👤 الاسم: ${name}\n` +
+          `🔗 اليوزر: ${username}\n` +
+          `🆔 الآي دي: \`${ctx.from.id}\`\n` +
+          `🕒 الوقت والتاريخ: ${new Date().toLocaleString("en-GB")}`,
+      );
+    } catch (err) {
+      console.error("فشل إرسال تنبيه الدخول للأدمن:", err);
+    }
   }
 
   ctx.state.user = user;
@@ -300,24 +290,6 @@ bot.use(async (ctx, next) => {
 
 bot.start(async (ctx) => {
   states.delete(ctx.from.id);
-  if (ctx.from.id.toString() !== ADMIN_ID) {
-    const name = [ctx.from.first_name, ctx.from.last_name]
-      .filter(Boolean)
-      .join(" ");
-    const username = ctx.from.username ? `@${ctx.from.username}` : "لا يوجد";
-    try {
-      await ctx.telegram.sendMessage(
-        ADMIN_ID,
-        `🚨 تنبيه دخول مستخدم إلى البوت\n\n` +
-          `👤 الاسم: ${name}\n` +
-          `🔗 اليوزر: ${username}\n` +
-          `🆔 الآي دي (Telegram ID): ${ctx.from.id}\n` +
-          `🕒 الوقت والتاريخ: ${new Date().toLocaleString("en-GB")}`,
-      );
-    } catch (err) {
-      console.error("فشل إرسال تنبيه الدخول للأدمن:", err);
-    }
-  }
   await showMenu(ctx, ctx.state.user);
 });
 
@@ -327,23 +299,6 @@ bot.command("cancel", async (ctx) => {
     "تم الإلغاء.",
     Markup.inlineKeyboard(mainMenuRows(ctx.state.user.role === "admin")),
   );
-});
-
-bot.command("testnotify", async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID) {
-    return ctx.reply("هذا الأمر مخصص للأدمن.");
-  }
-  try {
-    await ctx.telegram.sendMessage(ADMIN_ID, "✅ إشعارات البوت تعمل بنجاح.");
-    await ctx.reply("تم إرسال رسالة الاختبار إلى حساب الأدمن.");
-  } catch (error) {
-    const code = error.response?.error_code || "غير معروف";
-    const description = error.response?.description || error.message;
-    console.error(`فشل اختبار إشعار الأدمن (HTTP ${code}): ${description}`);
-    await ctx.reply(
-      `تعذر إرسال رسالة الاختبار (HTTP ${code}): ${description}`,
-    );
-  }
 });
 
 bot.on("callback_query", async (ctx) => {
@@ -371,8 +326,23 @@ bot.on("callback_query", async (ctx) => {
   if (action === "toggle" && user.role === "admin" && /^\d+$/.test(arg || "")) {
     const id = Number(arg);
     const record = await db.get("cases", id);
-    if (record)
-      await db.setStatus(id, record.status === "مفتوحة" ? "مغلقة" : "مفتوحة");
+    if (record) {
+      const newStatus = record.status === "مفتوحة" ? "مغلقة" : "مفتوحة";
+      await db.setStatus(id, newStatus);
+      // إشعار للأدمن بتغيير حالة القضية
+      const adminId = process.env.ADMIN_TELEGRAM_ID;
+      if (adminId) {
+        await ctx.telegram
+          .sendMessage(
+            adminId,
+            `🔓 **تحديث حالة قضية بواسطة الأدمن**\n\n` +
+              `📁 القضية: ${db.caseNo(id)} - ${record.title}\n` +
+              `📌 الحالة الجديدة: ${newStatus}\n` +
+              `🕒 الوقت: ${new Date().toLocaleString("en-GB")}`,
+          )
+          .catch(() => {});
+      }
+    }
     return showCase(ctx, id, user);
   }
 
@@ -391,6 +361,19 @@ bot.on("callback_query", async (ctx) => {
 
   if (action === "new" && KINDS.includes(arg) && /^\d+$/.test(value || "")) {
     const kind = arg;
+    // التحقق إذا كانت القضية مغلقة ولا تزال غير مسموحة
+    if (Number(value) > 0) {
+      const caseRecord = await db.get("cases", Number(value));
+      if (
+        caseRecord &&
+        caseRecord.status === "مغلقة" &&
+        user.role !== "admin"
+      ) {
+        return ctx.reply(
+          "❌ هذه القضية مغلقة ولا يمكن إضافة بيانات جديدة إليها حالياً.",
+        );
+      }
+    }
     states.set(userId, {
       mode: "new",
       kind,
@@ -466,25 +449,21 @@ bot.on("message", async (ctx) => {
   const newId = await db.add(state.kind, createdBy, data);
   states.delete(ctx.from.id);
 
-  const name =
-    [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") ||
-    user.name ||
-    "غير معروف";
-  const username = ctx.from.username ? `@${ctx.from.username}` : "غير متوفر";
-  let notificationError;
-  try {
-    await ctx.telegram.sendMessage(
-      ADMIN_ID,
-      `📢 تم ${ADD_ACTIONS[state.kind]}\n\n` +
-        `👤 اسم المستخدم: ${name}\n` +
-        `🔗 اسم الحساب: ${username}\n` +
-        `🆔 Telegram ID: ${ctx.from.id}`,
-    );
-  } catch (error) {
-    const code = error.response?.error_code || "غير معروف";
-    const description = error.response?.description || error.message;
-    notificationError = `تعذر إشعار الأدمن (HTTP ${code}): ${description}`;
-    console.error("فشل إرسال إشعار إضافة سجل للأدمن:", notificationError);
+  // إرسال إشعار فوري للأدمن بأن شخصاً ما حفظ سجل جديد (قضية جديدة أو حساب أو مشتبه به)
+  const adminId = process.env.ADMIN_TELEGRAM_ID;
+  if (adminId) {
+    try {
+      await ctx.telegram.sendMessage(
+        adminId,
+        `🚨 **تم حفظ عنصر جديد بنجاح!**\n\n` +
+          `👤 بواسطة المستخدم: ${user.name} (@${ctx.from.username || "بدون"})\n` +
+          `📌 القسم: ${SINGLE[state.kind]}\n` +
+          `🆔 رقم المعرف: #${newId}\n` +
+          `🕒 الوقت والتاريخ: ${new Date().toLocaleString("en-GB")}`,
+      );
+    } catch (e) {
+      console.error("خطأ في إرسال إشعار الحفظ للأدمن:", e);
+    }
   }
 
   const target =
@@ -494,7 +473,7 @@ bot.on("message", async (ctx) => {
         ? `item:independent_accounts:${newId}`
         : `case:${state.caseId}`;
   await ctx.reply(
-    `✅ تم حفظ ${SINGLE[state.kind]} بنجاح.${notificationError ? `\n⚠️ ${notificationError}` : ""}`,
+    `✅ تم حفظ ${SINGLE[state.kind]} بنجاح وتم إبلاغ الإدارة.`,
     Markup.inlineKeyboard([
       [Markup.button.callback("📂 استعراض السجل", target)],
       backRow(),
@@ -508,25 +487,12 @@ bot.catch((error, ctx) => {
 });
 
 (async () => {
-  let botStarted = false;
-  try {
-    await db.init();
-    await bot.launch();
-    botStarted = true;
-    await startHealthServer();
-    console.log("Bot is running securely with User Tracking & Roles...");
-  } catch (error) {
-    if (botStarted) bot.stop();
-    if (healthServer && healthServer.listening) {
-      await new Promise((resolve) => healthServer.close(resolve));
-    }
-    try {
-      await db.close();
-    } catch (closeError) {
-      console.error("Failed to close database after startup error:", closeError);
-    }
-    throw error;
-  }
+  await startHealthServer();
+  await db.init();
+  await bot.launch();
+  console.log(
+    "Bot is running securely with Notifications & Case Status Control...",
+  );
 })().catch((error) => {
   console.error("Failed to start bot:", error);
   process.exitCode = 1;

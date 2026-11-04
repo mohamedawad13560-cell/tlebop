@@ -1,4 +1,4 @@
-// طبقة قاعدة البيانات (MySQL) لبوت قسم التحقيق (محدثة)
+// طبقة قاعدة البيانات (MySQL) لبوت قسم التحقيق (محدثة بالكامل)
 const mysql = require("mysql2/promise");
 
 const pool = mysql.createPool({
