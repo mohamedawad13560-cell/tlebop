@@ -136,7 +136,8 @@ async function get(kind, id) {
 
 async function list(kind, caseId = 0, limit = 30) {
   if (!COLS[kind]) throw new Error("invalid kind");
-  if (kind !== "cases" && kind !== "independent_accounts" && caseId) {
+  if (["suspects", "evidence", "reports"].includes(kind)) {
+    if (!Number.isInteger(Number(caseId)) || Number(caseId) < 1) return [];
     const [rows] = await pool.query(
       `SELECT * FROM ${kind} WHERE case_id = ? ORDER BY id DESC LIMIT ?`,
       [caseId, limit],

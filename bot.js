@@ -9,6 +9,15 @@ const ADMIN_ID = process.env.ADMIN_TELEGRAM_ID?.trim();
 if (!ADMIN_ID || !/^[1-9]\d*$/.test(ADMIN_ID))
   throw new Error("ADMIN_TELEGRAM_ID مفقود أو غير صالح في ملف .env");
 
+const ADMIN_GROUP_ID = process.env.ADMIN_GROUP_ID?.trim();
+if (
+  !ADMIN_GROUP_ID ||
+  !/^-?\d+$/.test(ADMIN_GROUP_ID) ||
+  !Number.isSafeInteger(Number(ADMIN_GROUP_ID)) ||
+  Number(ADMIN_GROUP_ID) === 0
+)
+  throw new Error("ADMIN_GROUP_ID مفقود أو غير صالح في ملف .env");
+
 const LABELS = {
   cases: "📁 القضايا",
   suspects: "👤 المشتبه بهم",
@@ -32,6 +41,7 @@ const OPTIONAL = new Set([
   "file",
 ]);
 const KINDS = Object.keys(LABELS);
+const CASE_KINDS = new Set(["suspects", "evidence", "reports"]);
 
 const STEPS = {
   cases: [
@@ -101,12 +111,25 @@ function buttonLabel(text) {
   return chars.length > 64 ? `${chars.slice(0, 63).join("")}…` : text;
 }
 
+function messageText(text, maxUnits = 4000) {
+  let result = "";
+  let units = 0;
+  for (const char of text) {
+    if (units + char.length > maxUnits - 1) return `${result}…`;
+    result += char;
+    units += char.length;
+  }
+  return result;
+}
+
 function itemTitle(kind, record) {
   if (kind === "cases") return `${db.caseNo(record.id)} | ${record.title}`;
   if (kind === "suspects")
     return `${record.name} (${db.caseNo(record.case_id)})`;
   if (kind === "evidence")
-    return `دليل #${record.id}: ${(record.description || "").slice(0, 30)}`;
+    return `دليل #${record.id}: ${Array.from(record.description || "")
+      .slice(0, 30)
+      .join("")}`;
   if (kind === "independent_accounts")
     return `${record.account_name} (${record.account_link})`;
   return `${record.title} (${db.caseNo(record.case_id)})`;
@@ -170,7 +193,7 @@ const mainMenuRows = (isAdmin) => {
 
 async function show(ctx, text, rows) {
   const keyboard = Markup.inlineKeyboard(rows);
-  const body = text.length > 4000 ? `${text.slice(0, 4000)}…` : text;
+  const body = messageText(text);
   if (ctx.callbackQuery) {
     try {
       await ctx.editMessageText(body, keyboard);
@@ -191,6 +214,8 @@ const showMenu = async (ctx, user) =>
 
 async function showList(ctx, kind, caseId, user) {
   if (!KINDS.includes(kind)) return showMenu(ctx, user);
+  if (CASE_KINDS.has(kind) && (!Number.isInteger(caseId) || caseId < 1))
+    return show(ctx, "اختر قضية صالحة لعرض هذا القسم.", [backRow()]);
   const records = await db.list(kind, caseId);
   const buttons = records.map((record) => [
     Markup.button.callback(
@@ -199,8 +224,8 @@ async function showList(ctx, kind, caseId, user) {
     ),
   ]);
   let back = "menu";
-  if (kind === "suspects" || kind === "evidence" || kind === "reports") {
-    const caseRecord = caseId ? await db.get("cases", caseId) : null;
+  if (CASE_KINDS.has(kind)) {
+    const caseRecord = await db.get("cases", caseId);
     const canAdd =
       caseRecord &&
       (caseRecord.status !== "مغلقة" || user.role === "admin");
@@ -282,7 +307,7 @@ function extractFile(message) {
   return [null, null];
 }
 
-// تسجيل المستخدم والتحقق من صلاحيته لكل تحديث.
+// تسجيل المستخدم وتحديد صلاحياته، دون إرسال إشعار لكل تحديث.
 bot.use(async (ctx, next) => {
   if (!ctx.from) return;
   let user = await db.getUser(ctx.from.id);
@@ -297,17 +322,19 @@ bot.use(async (ctx, next) => {
     user = await db.getUser(ctx.from.id);
   }
 
-  user.role = ctx.from.id.toString() === ADMIN_ID ? "admin" : "member";
+  if (ctx.from.id.toString() === ADMIN_ID) user.role = "admin";
   ctx.state.user = user;
   return next();
 });
 
 bot.start(async (ctx) => {
+  if (ctx.chat?.type !== "private") return;
   states.delete(ctx.from.id);
   await showMenu(ctx, ctx.state.user);
 });
 
 bot.command("cancel", async (ctx) => {
+  if (ctx.chat?.type !== "private") return;
   states.delete(ctx.from.id);
   await ctx.reply(
     "تم الإلغاء.",
@@ -316,26 +343,32 @@ bot.command("cancel", async (ctx) => {
 });
 
 bot.command("testnotify", async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID)
+  if (ctx.chat?.type !== "private" || ctx.from.id.toString() !== ADMIN_ID)
     return ctx.reply("هذا الأمر مخصص للأدمن.");
   try {
-    await ctx.telegram.sendMessage(ADMIN_ID, "✅ إشعارات البوت تعمل بنجاح.");
-    return ctx.reply("تم إرسال رسالة الاختبار إلى حساب الأدمن.");
+    await ctx.telegram.sendMessage(
+      ADMIN_GROUP_ID,
+      "✅ إشعارات بوت التحقيق تعمل بنجاح.",
+    );
+    return ctx.reply("تم إرسال رسالة الاختبار إلى جروب الأدمن.");
   } catch (error) {
     const description =
       error.response?.description || error.message || "خطأ غير معروف";
-    console.error("فشل اختبار إشعار الأدمن:", description);
+    console.error("فشل اختبار إشعار جروب الأدمن:", description);
     return ctx.reply(`تعذر إرسال رسالة الاختبار: ${description}`);
   }
 });
 
 bot.on("callback_query", async (ctx) => {
   await ctx.answerCbQuery();
+  if (ctx.chat?.type !== "private")
+    return ctx.reply("افتح المحادثة الخاصة مع البوت لاستخدام أزراره.");
   const callback = ctx.callbackQuery.data;
   if (typeof callback !== "string") return;
   const [action, arg, value] = callback.split(":");
   const userId = ctx.from.id;
   const user = ctx.state.user;
+  if (!user) return;
   states.delete(userId);
 
   if (action === "menu") return showMenu(ctx, user);
@@ -357,10 +390,11 @@ bot.on("callback_query", async (ctx) => {
     if (record) {
       const newStatus = record.status === "مفتوحة" ? "مغلقة" : "مفتوحة";
       await db.setStatus(id, newStatus);
+
       let notificationError;
       try {
         await ctx.telegram.sendMessage(
-          ADMIN_ID,
+          ADMIN_GROUP_ID,
           `تحديث حالة قضية بواسطة الأدمن\n\n` +
             `📁 القضية: ${db.caseNo(id)} - ${record.title}\n` +
             `📌 الحالة الجديدة: ${newStatus}\n` +
@@ -391,7 +425,7 @@ bot.on("callback_query", async (ctx) => {
     if (!removed)
       return ctx.reply(
         "السجل غير موجود أو تم حذفه مسبقاً.",
-        Markup.inlineKeyboard(mainMenuRows(true)),
+        Markup.inlineKeyboard(mainMenuRows(user.role === "admin")),
       );
     return ctx.reply(
       "🗑️ تم الحذف بنجاح.",
@@ -402,8 +436,8 @@ bot.on("callback_query", async (ctx) => {
   if (action === "new" && KINDS.includes(arg) && /^\d+$/.test(value || "")) {
     const kind = arg;
     const caseId = Number(value);
-    if (["suspects", "evidence", "reports"].includes(kind)) {
-      if (caseId < 1)
+    if (CASE_KINDS.has(kind)) {
+      if (!Number.isSafeInteger(caseId) || caseId < 1)
         return ctx.reply("❌ اختر قضية صالحة قبل إضافة هذا السجل.");
       const caseRecord = await db.get("cases", caseId);
       if (!caseRecord)
@@ -435,10 +469,12 @@ bot.on("callback_query", async (ctx) => {
 });
 
 bot.on("message", async (ctx) => {
+  if (ctx.chat.type !== "private") return;
   const message = ctx.message;
   if (message.text && message.text.startsWith("/")) return;
   const state = states.get(ctx.from.id);
   const user = ctx.state.user;
+  if (!user) return ctx.reply("تعذر التحقق من حسابك. أرسل /start مجدداً.");
   if (!state) return showMenu(ctx, user);
 
   if (state.mode === "search" && user.role === "admin") {
@@ -453,14 +489,20 @@ bot.on("message", async (ctx) => {
       ),
     ]);
     buttons.push(backRow());
+    const query = messageText(text, 300);
     const heading = results.length
-      ? `نتائج البحث عن «${text}»: ${results.length}`
-      : `لا نتائج لـ «${text}»`;
+      ? `نتائج البحث عن «${query}»: ${results.length}`
+      : `لا نتائج لـ «${query}»`;
     return ctx.reply(heading, Markup.inlineKeyboard(buttons));
   }
 
   const steps = STEPS[state.kind];
-  const [field] = steps[state.step];
+  const step = steps?.[state.step];
+  if (!step) {
+    states.delete(ctx.from.id);
+    return ctx.reply("انتهت صلاحية نموذج الإدخال. ابدأ الإضافة من جديد.");
+  }
+  const [field] = step;
 
   if (field === "file") {
     const [fileId, fileType] = extractFile(message);
@@ -485,29 +527,56 @@ bot.on("message", async (ctx) => {
   const data = { ...state.data };
   if (state.kind !== "cases" && state.kind !== "independent_accounts")
     data.case_id = state.caseId;
+  if (CASE_KINDS.has(state.kind)) {
+    const caseRecord = await db.get("cases", state.caseId);
+    if (!caseRecord) {
+      states.delete(ctx.from.id);
+      return ctx.reply("❌ القضية لم تعد موجودة، تم إلغاء الإضافة.");
+    }
+    if (caseRecord.status === "مغلقة" && user.role !== "admin") {
+      states.delete(ctx.from.id);
+      return ctx.reply("❌ أُغلقت القضية أثناء الإضافة، لذلك لم يتم حفظ السجل.");
+    }
+  }
   const createdBy = user.name;
-  const newId = await db.add(state.kind, createdBy, data);
   states.delete(ctx.from.id);
+  let newId;
+  try {
+    newId = await db.add(state.kind, createdBy, data);
+  } catch (error) {
+    console.error("فشل حفظ سجل جديد في قاعدة البيانات:", error);
+    return ctx.reply(
+      "❌ تعذر حفظ البيانات في قاعدة البيانات. تحقق من اتصال MySQL ثم أعد المحاولة.",
+    );
+  }
 
+  // إرسال إشعار فوري لـ "جروب الأدمنز" بأن شخصاً ما حفظ سجل جديد مع تفاصيل البيانات المضافة
+  const name =
+    [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") ||
+    user.name ||
+    "غير معروف";
+  const username = ctx.from.username ? `@${ctx.from.username}` : "بدون يوزر";
+  const detailsSummary =
+    state.kind === "cases"
+      ? `عنوان القضية: ${data.title}\nالوصف: ${(data.description || "بدون").slice(0, 500)}`
+      : state.kind === "independent_accounts"
+        ? `اسم الحساب: ${data.account_name}\nالرابط: ${data.account_link}\nالمشتبه به: ${data.suspect_name || "بدون"}`
+        : `القضية: ${db.caseNo(state.caseId)}`;
   let notificationError;
   try {
-    const name =
-      [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") ||
-      user.name ||
-      "غير معروف";
-    const username = ctx.from.username ? `@${ctx.from.username}` : "بدون يوزر";
     await ctx.telegram.sendMessage(
-      ADMIN_ID,
+      ADMIN_GROUP_ID,
       `تمت إضافة ${SINGLE[state.kind]} جديدة\n\n` +
         `👤 المستخدم: ${name}\n` +
         `🔗 الحساب: ${username}\n` +
         `🆔 Telegram ID: ${ctx.from.id}\n` +
-        `📌 رقم السجل: #${newId}`,
+        `📌 رقم السجل: #${newId}\n` +
+        `${detailsSummary}`,
     );
   } catch (error) {
     notificationError =
       error.response?.description || error.message || "خطأ غير معروف";
-    console.error("فشل إرسال إشعار إضافة سجل للأدمن:", notificationError);
+    console.error("فشل إرسال إشعار إضافة سجل لجروب الأدمن:", notificationError);
   }
 
   const target =
@@ -518,8 +587,8 @@ bot.on("message", async (ctx) => {
         : `case:${state.caseId}`;
   await ctx.reply(
     notificationError
-      ? `✅ تم حفظ ${SINGLE[state.kind]} بنجاح، لكن تعذر إشعار الأدمن: ${notificationError}`
-      : `✅ تم حفظ ${SINGLE[state.kind]} بنجاح وإشعار الأدمن.`,
+      ? `✅ تم حفظ ${SINGLE[state.kind]} بنجاح، لكن تعذر إشعار جروب الأدمن: ${notificationError}`
+      : `✅ تم حفظ ${SINGLE[state.kind]} بنجاح وإشعار جروب الأدمن.`,
     Markup.inlineKeyboard([
       [Markup.button.callback("📂 استعراض السجل", target)],
       backRow(),
@@ -539,7 +608,7 @@ bot.catch((error, ctx) => {
     await bot.launch();
     botStarted = true;
     await startHealthServer();
-    console.log("Bot is running securely with Notifications & Case Status Control...");
+    console.log("Bot is running securely with Group Notifications...");
   } catch (error) {
     if (botStarted) bot.stop();
     if (healthServer && healthServer.listening) {
