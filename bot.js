@@ -9,14 +9,18 @@ const ADMIN_ID = process.env.ADMIN_TELEGRAM_ID?.trim();
 if (!ADMIN_ID || !/^[1-9]\d*$/.test(ADMIN_ID))
   throw new Error("ADMIN_TELEGRAM_ID مفقود أو غير صالح في ملف .env");
 
-const ADMIN_GROUP_ID = process.env.ADMIN_GROUP_ID?.trim();
+const ADMIN_CHAT_ID =
+  process.env.ADMIN_CHANNEL_ID?.trim() || process.env.ADMIN_GROUP_ID?.trim();
 if (
-  !ADMIN_GROUP_ID ||
-  !/^-?\d+$/.test(ADMIN_GROUP_ID) ||
-  !Number.isSafeInteger(Number(ADMIN_GROUP_ID)) ||
-  Number(ADMIN_GROUP_ID) === 0
+  !ADMIN_CHAT_ID ||
+  (!/^-100\d+$/.test(ADMIN_CHAT_ID) &&
+    !/^@[A-Za-z][A-Za-z0-9_]{4,31}$/.test(ADMIN_CHAT_ID)) ||
+  (ADMIN_CHAT_ID.startsWith("-") &&
+    !Number.isSafeInteger(Number(ADMIN_CHAT_ID)))
 )
-  throw new Error("ADMIN_GROUP_ID مفقود أو غير صالح في ملف .env");
+  throw new Error(
+    "ADMIN_CHANNEL_ID (أو ADMIN_GROUP_ID) مفقود أو غير صالح في ملف .env",
+  );
 
 const LABELS = {
   cases: "📁 القضايا",
@@ -346,16 +350,36 @@ bot.command("testnotify", async (ctx) => {
   if (ctx.chat?.type !== "private" || ctx.from.id.toString() !== ADMIN_ID)
     return ctx.reply("هذا الأمر مخصص للأدمن.");
   try {
+    const destination = await ctx.telegram.getChat(ADMIN_CHAT_ID);
+    if (destination.type !== "channel")
+      return ctx.reply(
+        `وجهة الإشعارات ليست قناة (النوع: ${destination.type}). تحقق من ADMIN_CHANNEL_ID.`,
+      );
+    const botMember = await ctx.telegram.getChatMember(
+      destination.id,
+      ctx.botInfo.id,
+    );
+    if (
+      !["administrator", "creator"].includes(botMember.status) ||
+      botMember.can_post_messages === false
+    ) {
+      return ctx.reply(
+        "البوت ليس مشرفاً في القناة أو لا يملك صلاحية نشر الرسائل.",
+      );
+    }
     await ctx.telegram.sendMessage(
-      ADMIN_GROUP_ID,
+      destination.id,
       "✅ إشعارات بوت التحقيق تعمل بنجاح.",
     );
-    return ctx.reply("تم إرسال رسالة الاختبار إلى جروب الأدمن.");
+    return ctx.reply(`تم إرسال رسالة الاختبار إلى قناة «${destination.title}».`);
   } catch (error) {
     const description =
       error.response?.description || error.message || "خطأ غير معروف";
-    console.error("فشل اختبار إشعار جروب الأدمن:", description);
-    return ctx.reply(`تعذر إرسال رسالة الاختبار: ${description}`);
+    const code = error.response?.error_code
+      ? ` (Telegram ${error.response.error_code})`
+      : "";
+    console.error(`فشل اختبار إشعار قناة الأدمن${code}: ${description}`);
+    return ctx.reply(`تعذر إرسال رسالة الاختبار${code}: ${description}`);
   }
 });
 
@@ -394,7 +418,7 @@ bot.on("callback_query", async (ctx) => {
       let notificationError;
       try {
         await ctx.telegram.sendMessage(
-          ADMIN_GROUP_ID,
+          ADMIN_CHAT_ID,
           `تحديث حالة قضية بواسطة الأدمن\n\n` +
             `📁 القضية: ${db.caseNo(id)} - ${record.title}\n` +
             `📌 الحالة الجديدة: ${newStatus}\n` +
@@ -565,7 +589,7 @@ bot.on("message", async (ctx) => {
   let notificationError;
   try {
     await ctx.telegram.sendMessage(
-      ADMIN_GROUP_ID,
+      ADMIN_CHAT_ID,
       `تمت إضافة ${SINGLE[state.kind]} جديدة\n\n` +
         `👤 المستخدم: ${name}\n` +
         `🔗 الحساب: ${username}\n` +
