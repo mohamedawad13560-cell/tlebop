@@ -78,7 +78,7 @@ const states = new Map();
 const bot = new Telegraf(TOKEN);
 let healthServer;
 
-bot.command("testnotify", async (ctx) => {
+async function testNotification(ctx) {
   if (ctx.chat?.type !== "private" || ctx.from.id.toString() !== ADMIN_ID)
     return ctx.reply("هذا الأمر مخصص للأدمن ويُستخدم في المحادثة الخاصة مع البوت.");
   try {
@@ -113,7 +113,9 @@ bot.command("testnotify", async (ctx) => {
     console.error(`فشل اختبار إشعار قناة الأدمن${code}: ${description}`);
     return ctx.reply(`تعذر إرسال رسالة الاختبار${code}: ${description}`);
   }
-});
+}
+
+bot.command("testnotify", testNotification);
 
 async function startHealthServer() {
   if (process.env.PORT === undefined || process.env.PORT === "") return;
@@ -495,6 +497,12 @@ bot.on("callback_query", async (ctx) => {
 bot.on("message", async (ctx) => {
   if (ctx.chat.type !== "private") return;
   const message = ctx.message;
+  if (
+    typeof message.text === "string" &&
+    /^\/testnotify(?:@\w+)?(?:\s|$)/i.test(message.text)
+  ) {
+    return testNotification(ctx);
+  }
   if (message.text && message.text.startsWith("/")) return;
   const state = states.get(ctx.from.id);
   const user = ctx.state.user;
