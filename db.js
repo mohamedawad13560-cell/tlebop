@@ -171,7 +171,8 @@ async function setStatus(caseId, status) {
 
 async function remove(kind, id) {
   if (!COLS[kind]) throw new Error("invalid kind");
-  await pool.query(`DELETE FROM ${kind} WHERE id = ?`, [id]);
+  const [result] = await pool.query(`DELETE FROM ${kind} WHERE id = ?`, [id]);
+  return result.affectedRows > 0;
 }
 
 async function search(text, perKind = 8) {
