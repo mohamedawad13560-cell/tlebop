@@ -329,6 +329,23 @@ bot.command("cancel", async (ctx) => {
   );
 });
 
+bot.command("testnotify", async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) {
+    return ctx.reply("هذا الأمر مخصص للأدمن.");
+  }
+  try {
+    await ctx.telegram.sendMessage(ADMIN_ID, "✅ إشعارات البوت تعمل بنجاح.");
+    await ctx.reply("تم إرسال رسالة الاختبار إلى حساب الأدمن.");
+  } catch (error) {
+    const code = error.response?.error_code || "غير معروف";
+    const description = error.response?.description || error.message;
+    console.error(`فشل اختبار إشعار الأدمن (HTTP ${code}): ${description}`);
+    await ctx.reply(
+      `تعذر إرسال رسالة الاختبار (HTTP ${code}): ${description}`,
+    );
+  }
+});
+
 bot.on("callback_query", async (ctx) => {
   await ctx.answerCbQuery();
   const callback = ctx.callbackQuery.data;
@@ -454,6 +471,7 @@ bot.on("message", async (ctx) => {
     user.name ||
     "غير معروف";
   const username = ctx.from.username ? `@${ctx.from.username}` : "غير متوفر";
+  let notificationError;
   try {
     await ctx.telegram.sendMessage(
       ADMIN_ID,
@@ -463,7 +481,10 @@ bot.on("message", async (ctx) => {
         `🆔 Telegram ID: ${ctx.from.id}`,
     );
   } catch (error) {
-    console.error("فشل إرسال إشعار إضافة سجل للأدمن:", error);
+    const code = error.response?.error_code || "غير معروف";
+    const description = error.response?.description || error.message;
+    notificationError = `تعذر إشعار الأدمن (HTTP ${code}): ${description}`;
+    console.error("فشل إرسال إشعار إضافة سجل للأدمن:", notificationError);
   }
 
   const target =
@@ -473,7 +494,7 @@ bot.on("message", async (ctx) => {
         ? `item:independent_accounts:${newId}`
         : `case:${state.caseId}`;
   await ctx.reply(
-    `✅ تم حفظ ${SINGLE[state.kind]} بنجاح.`,
+    `✅ تم حفظ ${SINGLE[state.kind]} بنجاح.${notificationError ? `\n⚠️ ${notificationError}` : ""}`,
     Markup.inlineKeyboard([
       [Markup.button.callback("📂 استعراض السجل", target)],
       backRow(),
