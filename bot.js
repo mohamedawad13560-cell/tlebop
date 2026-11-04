@@ -230,6 +230,9 @@ const mainMenuRows = (isAdmin) => {
   ];
   if (isAdmin) {
     rows.push([Markup.button.callback("🔍 بحث شامل (أدمن)", "search")]);
+    rows.push([
+      Markup.button.callback("🧪 اختبار إشعار القناة", "testnotify"),
+    ]);
   }
   return rows;
 };
@@ -398,6 +401,8 @@ bot.on("callback_query", async (ctx) => {
   states.delete(userId);
 
   if (action === "menu") return showMenu(ctx, user);
+  if (action === "testnotify" && user.role === "admin")
+    return testNotification(ctx);
   if (action === "list" && KINDS.includes(arg) && /^\d+$/.test(value || ""))
     return showList(ctx, arg, Number(value), user);
   if (action === "case" && /^\d+$/.test(arg || ""))
