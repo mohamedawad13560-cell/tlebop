@@ -5,22 +5,12 @@ const db = require("./db");
 
 const TOKEN = process.env.BOT_TOKEN;
 if (!TOKEN) throw new Error("BOT_TOKEN مفقود في ملف .env");
+
 const ADMIN_ID = process.env.ADMIN_TELEGRAM_ID?.trim();
 if (!ADMIN_ID || !/^[1-9]\d*$/.test(ADMIN_ID))
   throw new Error("ADMIN_TELEGRAM_ID مفقود أو غير صالح في ملف .env");
 
-const ADMIN_CHAT_ID =
-  process.env.ADMIN_CHANNEL_ID?.trim() || process.env.ADMIN_GROUP_ID?.trim();
-if (
-  !ADMIN_CHAT_ID ||
-  (!/^-100\d+$/.test(ADMIN_CHAT_ID) &&
-    !/^@[A-Za-z][A-Za-z0-9_]{4,31}$/.test(ADMIN_CHAT_ID)) ||
-  (ADMIN_CHAT_ID.startsWith("-") &&
-    !Number.isSafeInteger(Number(ADMIN_CHAT_ID)))
-)
-  throw new Error(
-    "ADMIN_CHANNEL_ID (أو ADMIN_GROUP_ID) مفقود أو غير صالح في ملف .env",
-  );
+const ADMIN_GROUP_ID = process.env.ADMIN_GROUP_ID?.trim();
 
 const LABELS = {
   cases: "📁 القضايا",
@@ -45,7 +35,6 @@ const OPTIONAL = new Set([
   "file",
 ]);
 const KINDS = Object.keys(LABELS);
-const CASE_KINDS = new Set(["suspects", "evidence", "reports"]);
 
 const STEPS = {
   cases: [
@@ -72,50 +61,22 @@ const STEPS = {
     ["text_evidence", "أدلة نصية؟ أو اكتب: تخطي"],
     ["file", "أرسل صورة أو ملف كدليل؟ أو اكتب: تخطي"],
   ],
+  new_task: [
+    ["title", "اسم المهمة المطلوبة؟"],
+    ["details", "تفاصيل وتوجيهات المهمة؟"],
+    [
+      "max_members",
+      "عدد الأعضاء المطلوبين لقبول المهمة؟ (اكتب رقماً فقط، مثل: 2)",
+    ],
+  ],
+  task_finish_report: [
+    ["report", "اكتب تقرير وتفاصيل إنجاز المهمة (أو أرسل ملف/صورة الإنجاز):"],
+  ],
 };
 
 const states = new Map();
 const bot = new Telegraf(TOKEN);
 let healthServer;
-
-async function testNotification(ctx) {
-  if (ctx.chat?.type !== "private" || ctx.from.id.toString() !== ADMIN_ID)
-    return ctx.reply("هذا الأمر مخصص للأدمن ويُستخدم في المحادثة الخاصة مع البوت.");
-  try {
-    const destination = await ctx.telegram.getChat(ADMIN_CHAT_ID);
-    if (destination.type !== "channel")
-      return ctx.reply(
-        `وجهة الإشعارات ليست قناة (النوع: ${destination.type}). تحقق من ADMIN_GROUP_ID.`,
-      );
-    const botMember = await ctx.telegram.getChatMember(
-      destination.id,
-      ctx.botInfo.id,
-    );
-    if (
-      !["administrator", "creator"].includes(botMember.status) ||
-      botMember.can_post_messages === false
-    ) {
-      return ctx.reply(
-        "البوت ليس مشرفاً في القناة أو لا يملك صلاحية نشر الرسائل.",
-      );
-    }
-    await ctx.telegram.sendMessage(
-      destination.id,
-      "✅ إشعارات بوت التحقيق تعمل بنجاح.",
-    );
-    return ctx.reply(`تم إرسال رسالة الاختبار إلى قناة «${destination.title}».`);
-  } catch (error) {
-    const description =
-      error.response?.description || error.message || "خطأ غير معروف";
-    const code = error.response?.error_code
-      ? ` (Telegram ${error.response.error_code})`
-      : "";
-    console.error(`فشل اختبار إشعار قناة الأدمن${code}: ${description}`);
-    return ctx.reply(`تعذر إرسال رسالة الاختبار${code}: ${description}`);
-  }
-}
-
-bot.command("testnotify", testNotification);
 
 async function startHealthServer() {
   if (process.env.PORT === undefined || process.env.PORT === "") return;
@@ -123,12 +84,6 @@ async function startHealthServer() {
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error("PORT must be a valid TCP port");
   healthServer = http.createServer((req, res) => {
-    const path = new URL(req.url, "http://localhost").pathname;
-    if (path !== "/" && path !== "/health") {
-      res.writeHead(404);
-      res.end("Not found\n");
-      return;
-    }
     res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("Bot is running\n");
   });
@@ -149,30 +104,12 @@ async function startHealthServer() {
 
 const fmtDate = (date) => new Date(date).toLocaleString("en-GB");
 
-function buttonLabel(text) {
-  const chars = Array.from(text);
-  return chars.length > 64 ? `${chars.slice(0, 63).join("")}…` : text;
-}
-
-function messageText(text, maxUnits = 4000) {
-  let result = "";
-  let units = 0;
-  for (const char of text) {
-    if (units + char.length > maxUnits - 1) return `${result}…`;
-    result += char;
-    units += char.length;
-  }
-  return result;
-}
-
 function itemTitle(kind, record) {
   if (kind === "cases") return `${db.caseNo(record.id)} | ${record.title}`;
   if (kind === "suspects")
     return `${record.name} (${db.caseNo(record.case_id)})`;
   if (kind === "evidence")
-    return `دليل #${record.id}: ${Array.from(record.description || "")
-      .slice(0, 30)
-      .join("")}`;
+    return `دليل #${record.id}: ${(record.description || "").slice(0, 30)}`;
   if (kind === "independent_accounts")
     return `${record.account_name} (${record.account_link})`;
   return `${record.title} (${db.caseNo(record.case_id)})`;
@@ -227,11 +164,15 @@ const mainMenuRows = (isAdmin) => {
         "new:independent_accounts:0",
       ),
     ],
+    [Markup.button.callback("📋 قائمة المهام", "tasks_list")],
   ];
   if (isAdmin) {
-    rows.push([Markup.button.callback("🔍 بحث شامل (أدمن)", "search")]);
     rows.push([
-      Markup.button.callback("🧪 اختبار إشعار القناة", "testnotify"),
+      Markup.button.callback("➕ إضافة مهمة جديدة", "new_task"),
+      Markup.button.callback("🔍 بحث شامل (أدمن)", "search"),
+    ]);
+    rows.push([
+      Markup.button.callback("📢 إرسال إشعار عام (Broadcast)", "broadcast"),
     ]);
   }
   return rows;
@@ -239,7 +180,7 @@ const mainMenuRows = (isAdmin) => {
 
 async function show(ctx, text, rows) {
   const keyboard = Markup.inlineKeyboard(rows);
-  const body = messageText(text);
+  const body = text.length > 4000 ? `${text.slice(0, 4000)}…` : text;
   if (ctx.callbackQuery) {
     try {
       await ctx.editMessageText(body, keyboard);
@@ -260,21 +201,23 @@ const showMenu = async (ctx, user) =>
 
 async function showList(ctx, kind, caseId, user) {
   if (!KINDS.includes(kind)) return showMenu(ctx, user);
-  if (CASE_KINDS.has(kind) && (!Number.isInteger(caseId) || caseId < 1))
-    return show(ctx, "اختر قضية صالحة لعرض هذا القسم.", [backRow()]);
   const records = await db.list(kind, caseId);
   const buttons = records.map((record) => [
-    Markup.button.callback(
-      buttonLabel(itemTitle(kind, record)),
-      itemCb(kind, record),
-    ),
+    Markup.button.callback(itemTitle(kind, record), itemCb(kind, record)),
   ]);
   let back = "menu";
-  if (CASE_KINDS.has(kind)) {
-    const caseRecord = await db.get("cases", caseId);
-    const canAdd =
-      caseRecord &&
-      (caseRecord.status !== "مغلقة" || user.role === "admin");
+  if (kind === "suspects" || kind === "evidence" || kind === "reports") {
+    let canAdd = true;
+    if (caseId) {
+      const caseRecord = await db.get("cases", caseId);
+      if (
+        caseRecord &&
+        caseRecord.status === "مغلقة" &&
+        user.role !== "admin"
+      ) {
+        canAdd = false;
+      }
+    }
     if (canAdd) {
       buttons.push([
         Markup.button.callback(
@@ -344,6 +287,72 @@ async function showItem(ctx, kind, id, user) {
   }
 }
 
+// عرض قائمة المهام
+async function showTasksList(ctx, user) {
+  const tasks = await db.listTasks();
+  const buttons = tasks.map((t) => [
+    Markup.button.callback(`📋 ${t.title} [${t.status}]`, `task_view:${t.id}`),
+  ]);
+  buttons.push(backRow());
+  await show(
+    ctx,
+    "📋 **قائمة المهام المتاحة:**\nاختر المهمة لعرض التفاصيل وقبولها:",
+    buttons,
+  );
+}
+
+// عرض تفاصيل مهمة
+async function showTaskView(ctx, taskId, user) {
+  const task = await db.getTask(taskId);
+  if (!task) return ctx.reply("المهمة غير موجودة.");
+
+  const assignments = await db.getTaskAssignments(taskId);
+  const isUserAccepted = assignments.some((a) => a.telegram_id == ctx.from.id);
+
+  let assigneesText = assignments.length
+    ? assignments.map((a) => `• ${a.user_name}`).join("\n")
+    : "لم يقبلها أحد بعد.";
+
+  const text =
+    `📋 **المهمة #${task.id}: ${task.title}**\n\n` +
+    `📝 **التفاصيل:**\n${task.details}\n\n` +
+    `👥 **المطلوب قبولهم:** ${assignments.length} من ${task.max_members}\n` +
+    `📌 **الأعضاء المقبولين حالياً:**\n${assigneesText}\n\n` +
+    `📊 **الحالة:** ${task.status}\n` +
+    `✍️ **المُنشئ:** ${task.created_by}\n` +
+    `🕒 **الوقت:** ${fmtDate(task.created_at)}`;
+
+  const buttons = [];
+
+  if (task.status !== "منتهية") {
+    if (isUserAccepted) {
+      buttons.push([
+        Markup.button.callback(
+          "🏁 إكمال المهمة وإرسال التقرير",
+          `task_finish:${task.id}`,
+        ),
+        Markup.button.callback(
+          "🚪 الانسحاب من المهمة",
+          `task_withdraw:${task.id}`,
+        ),
+      ]);
+    } else if (assignments.length < task.max_members) {
+      buttons.push([
+        Markup.button.callback("✅ قبول المهمة", `task_accept:${task.id}`),
+      ]);
+    }
+  }
+
+  if (user.role === "admin") {
+    buttons.push([
+      Markup.button.callback("🗑️ حذف المهمة (أدمن)", `task_delete:${task.id}`),
+    ]);
+  }
+
+  buttons.push(backRow("tasks_list"));
+  await show(ctx, text, buttons);
+}
+
 function extractFile(message) {
   if (message.photo)
     return [message.photo[message.photo.length - 1].file_id, "photo"];
@@ -353,34 +362,50 @@ function extractFile(message) {
   return [null, null];
 }
 
-// تسجيل المستخدم وتحديد صلاحياته، دون إرسال إشعار لكل تحديث.
+// فحص التسجيل وتنبيهات الجروب
 bot.use(async (ctx, next) => {
   if (!ctx.from) return;
+  if (ctx.chat && ctx.chat.type !== "private") return next();
+
   let user = await db.getUser(ctx.from.id);
 
   const name = [ctx.from.first_name, ctx.from.last_name]
     .filter(Boolean)
     .join(" ");
-
+  const username = ctx.from.username ? `@${ctx.from.username}` : "لا يوجد";
   if (!user) {
     const role = ctx.from.id.toString() === ADMIN_ID ? "admin" : "member";
     await db.registerUser(ctx.from.id, name, role);
     user = await db.getUser(ctx.from.id);
   }
 
-  if (ctx.from.id.toString() === ADMIN_ID) user.role = "admin";
+  if (ADMIN_GROUP_ID && ctx.from.id.toString() !== ADMIN_ID) {
+    try {
+      await ctx.telegram.sendMessage(
+        ADMIN_GROUP_ID,
+        `🚨 **تنبيه نشاط مستخدم في البوت!**\n\n` +
+          `👤 الاسم: ${name}\n` +
+          `🔗 اليوزر: ${username}\n` +
+          `🆔 الآي دي: \`${ctx.from.id}\`\n` +
+          `🕒 الوقت والتاريخ: ${new Date().toLocaleString("en-GB")}`,
+      );
+    } catch (err) {
+      console.error("فشل إرسال تنبيه الدخول لجروب الأدمنز:", err);
+    }
+  }
+
   ctx.state.user = user;
   return next();
 });
 
 bot.start(async (ctx) => {
-  if (ctx.chat?.type !== "private") return;
+  if (ctx.chat.type !== "private") return;
   states.delete(ctx.from.id);
   await showMenu(ctx, ctx.state.user);
 });
 
 bot.command("cancel", async (ctx) => {
-  if (ctx.chat?.type !== "private") return;
+  if (ctx.chat.type !== "private") return;
   states.delete(ctx.from.id);
   await ctx.reply(
     "تم الإلغاء.",
@@ -390,8 +415,6 @@ bot.command("cancel", async (ctx) => {
 
 bot.on("callback_query", async (ctx) => {
   await ctx.answerCbQuery();
-  if (ctx.chat?.type !== "private")
-    return ctx.reply("افتح المحادثة الخاصة مع البوت لاستخدام أزراره.");
   const callback = ctx.callbackQuery.data;
   if (typeof callback !== "string") return;
   const [action, arg, value] = callback.split(":");
@@ -401,8 +424,57 @@ bot.on("callback_query", async (ctx) => {
   states.delete(userId);
 
   if (action === "menu") return showMenu(ctx, user);
-  if (action === "testnotify" && user.role === "admin")
-    return testNotification(ctx);
+  if (action === "tasks_list") return showTasksList(ctx, user);
+  if (action === "task_view" && /^\d+$/.test(arg || ""))
+    return showTaskView(ctx, Number(arg), user);
+
+  // قبول المهمة
+  if (action === "task_accept" && /^\d+$/.test(arg || "")) {
+    const res = await db.acceptTask(Number(arg), userId, user.name);
+    if (!res.success) {
+      await ctx.reply(res.message);
+    } else {
+      await ctx.reply("✅ تم قبول المهمة بنجاح! بالتوفيق في إنجازها.");
+    }
+    return showTaskView(ctx, Number(arg), user);
+  }
+
+  // الانسحاب من المهمة
+  if (action === "task_withdraw" && /^\d+$/.test(arg || "")) {
+    await db.withdrawTask(Number(arg), userId);
+    await ctx.reply("🚪 تم انسحابك من المهمة.");
+    return showTaskView(ctx, Number(arg), user);
+  }
+
+  // إكمال المهمة (بدء استقبال التقرير)
+  if (action === "task_finish" && /^\d+$/.test(arg || "")) {
+    const taskId = Number(arg);
+    const task = await db.getTask(taskId);
+    const assignments = task ? await db.getTaskAssignments(taskId) : [];
+    if (
+      !task ||
+      task.status === "منتهية" ||
+      !assignments.some((assignment) => assignment.telegram_id == userId)
+    ) {
+      return ctx.reply("لا يمكنك إكمال هذه المهمة أو أنها لم تعد متاحة.");
+    }
+    states.set(userId, { mode: "task_finish_report", taskId });
+    return ctx.reply(
+      "📝 أرسل الآن تقرير إنجاز المهمة أو تفاصيل الانتهاء (مع إمكانية إرفاق صورة/ملف):",
+    );
+  }
+
+  // حذف المهمة (أدمن)
+  if (
+    action === "task_delete" &&
+    user.role === "admin" &&
+    /^\d+$/.test(arg || "")
+  ) {
+    await db.deleteTask(Number(arg));
+    await ctx.reply("🗑️ تم حذف المهمة بنجاح.");
+    return showTasksList(ctx, user);
+  }
+
   if (action === "list" && KINDS.includes(arg) && /^\d+$/.test(value || ""))
     return showList(ctx, arg, Number(value), user);
   if (action === "case" && /^\d+$/.test(arg || ""))
@@ -422,26 +494,17 @@ bot.on("callback_query", async (ctx) => {
       const newStatus = record.status === "مفتوحة" ? "مغلقة" : "مفتوحة";
       await db.setStatus(id, newStatus);
 
-      let notificationError;
-      try {
-        await ctx.telegram.sendMessage(
-          ADMIN_CHAT_ID,
-          `تحديث حالة قضية بواسطة الأدمن\n\n` +
-            `📁 القضية: ${db.caseNo(id)} - ${record.title}\n` +
-            `📌 الحالة الجديدة: ${newStatus}\n` +
-            `🕒 الوقت: ${new Date().toLocaleString("en-GB")}`,
-        );
-      } catch (error) {
-        notificationError =
-          error.response?.description || error.message || "خطأ غير معروف";
-        console.error("فشل إشعار تغيير حالة القضية:", notificationError);
+      if (ADMIN_GROUP_ID) {
+        await ctx.telegram
+          .sendMessage(
+            ADMIN_GROUP_ID,
+            `🔓 **تحديث حالة قضية بواسطة الأدمن**\n\n` +
+              `📁 القضية: ${db.caseNo(id)} - ${record.title}\n` +
+              `📌 الحالة الجديدة: ${newStatus}\n` +
+              `🕒 الوقت: ${new Date().toLocaleString("en-GB")}`,
+          )
+          .catch(() => {});
       }
-      await showCase(ctx, id, user);
-      if (notificationError)
-        return ctx.reply(
-          `تم تحديث حالة القضية، لكن تعذر إرسال الإشعار: ${notificationError}`,
-        );
-      return;
     }
     return showCase(ctx, id, user);
   }
@@ -452,12 +515,7 @@ bot.on("callback_query", async (ctx) => {
     KINDS.includes(arg) &&
     /^\d+$/.test(value || "")
   ) {
-    const removed = await db.remove(arg, Number(value));
-    if (!removed)
-      return ctx.reply(
-        "السجل غير موجود أو تم حذفه مسبقاً.",
-        Markup.inlineKeyboard(mainMenuRows(user.role === "admin")),
-      );
+    await db.remove(arg, Number(value));
     return ctx.reply(
       "🗑️ تم الحذف بنجاح.",
       Markup.inlineKeyboard(mainMenuRows(user.role === "admin")),
@@ -466,14 +524,13 @@ bot.on("callback_query", async (ctx) => {
 
   if (action === "new" && KINDS.includes(arg) && /^\d+$/.test(value || "")) {
     const kind = arg;
-    const caseId = Number(value);
-    if (CASE_KINDS.has(kind)) {
-      if (!Number.isSafeInteger(caseId) || caseId < 1)
-        return ctx.reply("❌ اختر قضية صالحة قبل إضافة هذا السجل.");
-      const caseRecord = await db.get("cases", caseId);
-      if (!caseRecord)
-        return ctx.reply("❌ القضية غير موجودة.");
-      if (caseRecord.status === "مغلقة" && user.role !== "admin") {
+    if (Number(value) > 0) {
+      const caseRecord = await db.get("cases", Number(value));
+      if (
+        caseRecord &&
+        caseRecord.status === "مغلقة" &&
+        user.role !== "admin"
+      ) {
         return ctx.reply(
           "❌ هذه القضية مغلقة ولا يمكن إضافة بيانات جديدة إليها حالياً.",
         );
@@ -482,12 +539,20 @@ bot.on("callback_query", async (ctx) => {
     states.set(userId, {
       mode: "new",
       kind,
-      caseId,
+      caseId: Number(value),
       step: 0,
       data: {},
     });
     return ctx.reply(
       `➕ ${SINGLE[kind]} جديد\n\n${STEPS[kind][0][1]}\n\n(/cancel للإلغاء)`,
+    );
+  }
+
+  // إنشاء مهمة جديدة (أدمن)
+  if (action === "new_task" && user.role === "admin") {
+    states.set(userId, { mode: "new_task", kind: "task", step: 0, data: {} });
+    return ctx.reply(
+      `➕ **إنشاء مهمة جديدة**\n\n${STEPS.new_task[0][1]}\n\n(/cancel للإلغاء)`,
     );
   }
 
@@ -497,22 +562,164 @@ bot.on("callback_query", async (ctx) => {
       "🔍 اكتب كلمة البحث الشاملة (اسم، يوزر، قضية، وصف...)\n\n(/cancel للإلغاء)",
     );
   }
+
+  if (action === "broadcast" && user.role === "admin") {
+    states.set(userId, { mode: "broadcast" });
+    return ctx.reply(
+      "📢 **إرسال إشعار عام:**\nاكتب نص الرسالة التي تريد إرسالها لجميع مستخدمي البوت.\n\n(/cancel للإلغاء)",
+    );
+  }
 });
 
 bot.on("message", async (ctx) => {
   if (ctx.chat.type !== "private") return;
   const message = ctx.message;
-  if (
-    typeof message.text === "string" &&
-    /^\/testnotify(?:@\w+)?(?:\s|$)/i.test(message.text)
-  ) {
-    return testNotification(ctx);
-  }
   if (message.text && message.text.startsWith("/")) return;
   const state = states.get(ctx.from.id);
   const user = ctx.state.user;
-  if (!user) return ctx.reply("تعذر التحقق من حسابك. أرسل /start مجدداً.");
-  if (!state) return showMenu(ctx, user);
+  if (!user || !state) return showMenu(ctx, user);
+
+  // إرسال إنجاز المهمة والتقرير
+  if (state.mode === "task_finish_report") {
+    const [fileId, fileType] = extractFile(message);
+    const reportText = typeof message.text === "string" ? message.text.trim() : "";
+    if (!reportText && !fileId)
+      return ctx.reply("أرسل تقريراً نصياً أو أرفق ملفاً أو صورة للإنجاز.");
+
+    const taskId = state.taskId;
+    const task = await db.getTask(taskId);
+    const assignments = task ? await db.getTaskAssignments(taskId) : [];
+    if (
+      !task ||
+      task.status === "منتهية" ||
+      !assignments.some((assignment) => assignment.telegram_id == ctx.from.id)
+    ) {
+      states.delete(ctx.from.id);
+      return ctx.reply("تعذر إكمال المهمة؛ قد تكون حُذفت أو أُغلقت بالفعل.");
+    }
+
+    await db.completeTask(taskId);
+    states.delete(ctx.from.id);
+
+    // إرسال إشعار تفصيلي لجروب الأدمنز بالإنجاز
+    if (ADMIN_GROUP_ID) {
+      try {
+        await ctx.telegram.sendMessage(
+          ADMIN_GROUP_ID,
+          `🏁 **تم إنجاز مهمة وإغلاقها بنجاح!**\n\n` +
+            `📋 المهمة: ${task.title}\n` +
+            `👤 بواسطة العضو: ${user.name} (@${ctx.from.username || "بدون"})\n` +
+            `📝 التقرير:\n${reportText}\n\n` +
+            `🕒 الوقت: ${new Date().toLocaleString("en-GB")}`,
+        );
+        if (fileId) {
+          const senders = {
+            photo: "sendPhoto",
+            document: "sendDocument",
+            video: "sendVideo",
+            voice: "sendVoice",
+            audio: "sendAudio",
+          };
+          const send = ctx.telegram[senders[fileType] || "sendDocument"];
+          await send.call(ctx.telegram, ADMIN_GROUP_ID, fileId);
+        }
+      } catch (err) {
+        console.error("خطأ في إرسال تقرير المهمة للجروب:", err);
+      }
+    }
+
+    return ctx.reply(
+      "✅ تم إرسال تقرير إنجاز المهمة بنجاح للإدارة وإغلاق المهمة.",
+      Markup.inlineKeyboard([backRow("tasks_list")]),
+    );
+  }
+
+  // استكمال خطوات إنشاء مهمة جديدة (أدمن)
+  if (state.mode === "new_task" && user.role === "admin") {
+    const steps = STEPS.new_task;
+    const [field] = steps[state.step];
+
+    if (field === "max_members") {
+      const val = Number((message.text || "").trim());
+      if (!Number.isInteger(val) || val < 1)
+        return ctx.reply("يرجى كتابة رقم صحيح أكبر من أو يساوي 1.");
+      state.data[field] = val;
+    } else {
+      if (typeof message.text !== "string")
+        return ctx.reply("أرسل نصاً من فضلك.");
+      const val = message.text.trim();
+      if (!val) return ctx.reply("لا يمكن ترك هذا الحقل فارغاً.");
+      state.data[field] = val;
+    }
+
+    state.step += 1;
+    if (state.step < steps.length) return ctx.reply(steps[state.step][1]);
+
+    // حفظ المهمة في قاعدة البيانات
+    const data = state.data;
+    const newTaskId = await db.addTask(
+      data.title,
+      data.details,
+      data.max_members,
+      user.name,
+    );
+    states.delete(ctx.from.id);
+
+    // 🚀 **الإشعار التلقائي الفوري الجديد:** إرسال إشعار لجميع المستخدمين في البوت بأن هناك مهمة جديدة أُضيفت!
+    const allUsers = await db.getAllUsers();
+    for (const u of allUsers) {
+      try {
+        await ctx.telegram.sendMessage(
+          u.telegram_id,
+          `🚨 **تنبيه: مهمة جديدة أُضيفت لقائمة المهام!**\n\n` +
+            `📋 العنوان: ${data.title}\n` +
+            `👥 الأعضاء المطلوبة: ${data.max_members}\n\n` +
+            `اضغط على زر (قائمة المهام) في القائمة الرئيسية لاستعراضها وقبولها!`,
+        );
+      } catch (err) {
+        // تجاهل من قاموا بحظر البوت
+      }
+    }
+
+    return ctx.reply(
+      `✅ تم إنشاء المهمة ونشرها وإرسال إشعار فوري لجميع الأعضاء بنجاح.`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback("📋 عرض قائمة المهام", "tasks_list")],
+        backRow(),
+      ]),
+    );
+  }
+
+  if (state.mode === "broadcast" && user.role === "admin") {
+    const broadcastText = message.text;
+    if (!broadcastText) return ctx.reply("يرجى إرسال نص للإشعار.");
+
+    states.delete(ctx.from.id);
+    await ctx.reply("⏳ جاري إرسال الإشعار لجميع المستخدمين...");
+
+    const allUsers = await db.getAllUsers();
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const u of allUsers) {
+      try {
+        await ctx.telegram.sendMessage(
+          u.telegram_id,
+          `📢 **إشعار هامي من إدارة التحقيق:**\n\n${broadcastText}`,
+        );
+        successCount++;
+      } catch (err) {
+        failCount++;
+      }
+    }
+
+    return ctx.reply(
+      `✅ **تم الانتهاء من إرسال الإشعار العام:**\n\n` +
+        `🎯 تم الإرسال بنجاح إلى: ${successCount} مستخدم\n` +
+        `❌ فشل الإرسال إلى (حظروا البوت): ${failCount} مستخدم`,
+      Markup.inlineKeyboard(mainMenuRows(true)),
+    );
+  }
 
   if (state.mode === "search" && user.role === "admin") {
     const text = (message.text || "").trim();
@@ -521,25 +728,19 @@ bot.on("message", async (ctx) => {
     const results = await db.search(text);
     const buttons = results.map(([kind, record]) => [
       Markup.button.callback(
-        buttonLabel(`${SINGLE[kind]}: ${itemTitle(kind, record)}`),
+        `${SINGLE[kind]}: ${itemTitle(kind, record)}`,
         itemCb(kind, record),
       ),
     ]);
     buttons.push(backRow());
-    const query = messageText(text, 300);
     const heading = results.length
-      ? `نتائج البحث عن «${query}»: ${results.length}`
-      : `لا نتائج لـ «${query}»`;
+      ? `نتائج البحث عن «${text}»: ${results.length}`
+      : `لا نتائج لـ «${text}»`;
     return ctx.reply(heading, Markup.inlineKeyboard(buttons));
   }
 
   const steps = STEPS[state.kind];
-  const step = steps?.[state.step];
-  if (!step) {
-    states.delete(ctx.from.id);
-    return ctx.reply("انتهت صلاحية نموذج الإدخال. ابدأ الإضافة من جديد.");
-  }
-  const [field] = step;
+  const [field] = steps[state.step];
 
   if (field === "file") {
     const [fileId, fileType] = extractFile(message);
@@ -564,56 +765,33 @@ bot.on("message", async (ctx) => {
   const data = { ...state.data };
   if (state.kind !== "cases" && state.kind !== "independent_accounts")
     data.case_id = state.caseId;
-  if (CASE_KINDS.has(state.kind)) {
-    const caseRecord = await db.get("cases", state.caseId);
-    if (!caseRecord) {
-      states.delete(ctx.from.id);
-      return ctx.reply("❌ القضية لم تعد موجودة، تم إلغاء الإضافة.");
-    }
-    if (caseRecord.status === "مغلقة" && user.role !== "admin") {
-      states.delete(ctx.from.id);
-      return ctx.reply("❌ أُغلقت القضية أثناء الإضافة، لذلك لم يتم حفظ السجل.");
-    }
-  }
   const createdBy = user.name;
+  const newId = await db.add(state.kind, createdBy, data);
   states.delete(ctx.from.id);
-  let newId;
-  try {
-    newId = await db.add(state.kind, createdBy, data);
-  } catch (error) {
-    console.error("فشل حفظ سجل جديد في قاعدة البيانات:", error);
-    return ctx.reply(
-      "❌ تعذر حفظ البيانات في قاعدة البيانات. تحقق من اتصال MySQL ثم أعد المحاولة.",
-    );
-  }
 
-  // إرسال إشعار فوري لـ "جروب الأدمنز" بأن شخصاً ما حفظ سجل جديد مع تفاصيل البيانات المضافة
-  const name =
-    [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") ||
-    user.name ||
-    "غير معروف";
-  const username = ctx.from.username ? `@${ctx.from.username}` : "بدون يوزر";
-  const detailsSummary =
-    state.kind === "cases"
-      ? `عنوان القضية: ${data.title}\nالوصف: ${(data.description || "بدون").slice(0, 500)}`
-      : state.kind === "independent_accounts"
-        ? `اسم الحساب: ${data.account_name}\nالرابط: ${data.account_link}\nالمشتبه به: ${data.suspect_name || "بدون"}`
-        : `القضية: ${db.caseNo(state.caseId)}`;
-  let notificationError;
-  try {
-    await ctx.telegram.sendMessage(
-      ADMIN_CHAT_ID,
-      `تمت إضافة ${SINGLE[state.kind]} جديدة\n\n` +
-        `👤 المستخدم: ${name}\n` +
-        `🔗 الحساب: ${username}\n` +
-        `🆔 Telegram ID: ${ctx.from.id}\n` +
-        `📌 رقم السجل: #${newId}\n` +
-        `${detailsSummary}`,
-    );
-  } catch (error) {
-    notificationError =
-      error.response?.description || error.message || "خطأ غير معروف";
-    console.error("فشل إرسال إشعار إضافة سجل لجروب الأدمن:", notificationError);
+  if (ADMIN_GROUP_ID) {
+    try {
+      let detailsSummary = "";
+      if (state.kind === "cases") {
+        detailsSummary = `📌 عنوان القضية: ${data.title}\n📝 الوصف: ${data.description || "بدون"}`;
+      } else if (state.kind === "independent_accounts") {
+        detailsSummary = `🕶️ اسم الحساب: ${data.account_name}\n🔗 الرابط: ${data.account_link}\n👤 المشتبه به: ${data.suspect_name || "بدون"}`;
+      } else {
+        detailsSummary = `📌 تفاصيل الإضافة مرتبطة بالقضية رقم: ${db.caseNo(state.caseId)}`;
+      }
+
+      await ctx.telegram.sendMessage(
+        ADMIN_GROUP_ID,
+        `🚨 **تم حفظ عنصر جديد بواسطة عضو!**\n\n` +
+          `👤 العضو: ${user.name} (@${ctx.from.username || "بدون"})\n` +
+          `📂 القسم: ${SINGLE[state.kind]}\n` +
+          `🆔 رقم المعرف: #${newId}\n\n` +
+          `${detailsSummary}\n\n` +
+          `🕒 الوقت والتاريخ: ${new Date().toLocaleString("en-GB")}`,
+      );
+    } catch (e) {
+      console.error("خطأ في إرسال إشعار الحفظ لجروب الأدمنز:", e);
+    }
   }
 
   const target =
@@ -623,9 +801,7 @@ bot.on("message", async (ctx) => {
         ? `item:independent_accounts:${newId}`
         : `case:${state.caseId}`;
   await ctx.reply(
-    notificationError
-      ? `✅ تم حفظ ${SINGLE[state.kind]} بنجاح، لكن تعذر إشعار جروب الأدمن: ${notificationError}`
-      : `✅ تم حفظ ${SINGLE[state.kind]} بنجاح وإشعار جروب الأدمن.`,
+    `✅ تم حفظ ${SINGLE[state.kind]} بنجاح وتم إبلاغ الإدارة في الجروب.`,
     Markup.inlineKeyboard([
       [Markup.button.callback("📂 استعراض السجل", target)],
       backRow(),
@@ -639,25 +815,10 @@ bot.catch((error, ctx) => {
 });
 
 (async () => {
-  let botStarted = false;
-  try {
-    await db.init();
-    await bot.launch();
-    botStarted = true;
-    await startHealthServer();
-    console.log("Bot is running securely with Group Notifications...");
-  } catch (error) {
-    if (botStarted) bot.stop();
-    if (healthServer && healthServer.listening) {
-      await new Promise((resolve) => healthServer.close(resolve));
-    }
-    try {
-      await db.close();
-    } catch (closeError) {
-      console.error("Failed to close database after startup error:", closeError);
-    }
-    throw error;
-  }
+  await startHealthServer();
+  await db.init();
+  await bot.launch();
+  console.log("Bot is running with Tasks & Instant Task Notifications...");
 })().catch((error) => {
   console.error("Failed to start bot:", error);
   process.exitCode = 1;

@@ -1,4 +1,4 @@
-// طبقة قاعدة البيانات (MySQL) لبوت قسم التحقيق (محدثة بالكامل)
+// طبقة قاعدة البيانات (MySQL) لبوت قسم التحقيق (محدثة بالكامل مع نظام المهام)
 const mysql = require("mysql2/promise");
 
 const pool = mysql.createPool({
@@ -19,6 +19,7 @@ const SCHEMA = [
     role VARCHAR(20) NOT NULL DEFAULT 'member',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
   `CREATE TABLE IF NOT EXISTS cases (
     id INT AUTO_INCREMENT PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
@@ -27,6 +28,7 @@ const SCHEMA = [
     created_by VARCHAR(255),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
   `CREATE TABLE IF NOT EXISTS suspects (
     id INT AUTO_INCREMENT PRIMARY KEY,
     case_id INT NOT NULL,
@@ -37,6 +39,7 @@ const SCHEMA = [
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
   `CREATE TABLE IF NOT EXISTS evidence (
     id INT AUTO_INCREMENT PRIMARY KEY,
     case_id INT NOT NULL,
@@ -47,6 +50,7 @@ const SCHEMA = [
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
   `CREATE TABLE IF NOT EXISTS reports (
     id INT AUTO_INCREMENT PRIMARY KEY,
     case_id INT NOT NULL,
@@ -56,6 +60,7 @@ const SCHEMA = [
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
   `CREATE TABLE IF NOT EXISTS independent_accounts (
     id INT AUTO_INCREMENT PRIMARY KEY,
     account_name VARCHAR(255) NOT NULL,
@@ -66,6 +71,26 @@ const SCHEMA = [
     file_type VARCHAR(20),
     created_by VARCHAR(255),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+  `CREATE TABLE IF NOT EXISTS tasks (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    details TEXT NOT NULL,
+    max_members INT NOT NULL DEFAULT 1,
+    status VARCHAR(30) NOT NULL DEFAULT 'قيد الانتظار',
+    created_by VARCHAR(255),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+  `CREATE TABLE IF NOT EXISTS task_assignments (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    task_id INT NOT NULL,
+    telegram_id BIGINT NOT NULL,
+    user_name VARCHAR(255) NOT NULL,
+    assigned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+    UNIQUE KEY unique_user_task (task_id, telegram_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 ];
 
@@ -110,6 +135,11 @@ async function getUser(telegramId) {
   return rows[0] || null;
 }
 
+async function getAllUsers() {
+  const [rows] = await pool.query("SELECT telegram_id FROM users");
+  return rows;
+}
+
 async function registerUser(telegramId, name, role = "member") {
   await pool.query(
     "INSERT INTO users (telegram_id, name, role) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE name = ?",
@@ -136,8 +166,7 @@ async function get(kind, id) {
 
 async function list(kind, caseId = 0, limit = 30) {
   if (!COLS[kind]) throw new Error("invalid kind");
-  if (["suspects", "evidence", "reports"].includes(kind)) {
-    if (!Number.isInteger(Number(caseId)) || Number(caseId) < 1) return [];
+  if (kind !== "cases" && kind !== "independent_accounts" && caseId) {
     const [rows] = await pool.query(
       `SELECT * FROM ${kind} WHERE case_id = ? ORDER BY id DESC LIMIT ?`,
       [caseId, limit],
@@ -172,8 +201,7 @@ async function setStatus(caseId, status) {
 
 async function remove(kind, id) {
   if (!COLS[kind]) throw new Error("invalid kind");
-  const [result] = await pool.query(`DELETE FROM ${kind} WHERE id = ?`, [id]);
-  return result.affectedRows > 0;
+  await pool.query(`DELETE FROM ${kind} WHERE id = ?`, [id]);
 }
 
 async function search(text, perKind = 8) {
@@ -200,10 +228,99 @@ async function search(text, perKind = 8) {
   return results;
 }
 
+// الدوال الخاصة بالمهام (Tasks)
+async function addTask(title, details, maxMembers, createdBy) {
+  const [res] = await pool.query(
+    "INSERT INTO tasks (title, details, max_members, created_by) VALUES (?, ?, ?, ?)",
+    [title, details, maxMembers, createdBy],
+  );
+  return res.insertId;
+}
+
+async function listTasks(limit = 30) {
+  const [rows] = await pool.query(
+    "SELECT * FROM tasks ORDER BY id DESC LIMIT ?",
+    [limit],
+  );
+  return rows;
+}
+
+async function getTask(taskId) {
+  const [rows] = await pool.query("SELECT * FROM tasks WHERE id = ?", [taskId]);
+  return rows[0] || null;
+}
+
+async function getTaskAssignments(taskId) {
+  const [rows] = await pool.query(
+    "SELECT * FROM task_assignments WHERE task_id = ?",
+    [taskId],
+  );
+  return rows;
+}
+
+async function acceptTask(taskId, telegramId, userName) {
+  const task = await getTask(taskId);
+  if (!task) return { success: false, message: "المهمة غير موجودة." };
+
+  const assignments = await getTaskAssignments(taskId);
+  if (assignments.some((a) => a.telegram_id == telegramId)) {
+    return { success: false, message: "لقد قمت بقبول هذه المهمة بالفعل!" };
+  }
+
+  if (assignments.length >= task.max_members) {
+    return {
+      success: false,
+      message: "عذرًا، التكتل مكتمل لهذه المهمة بالعدد المطلوب.",
+    };
+  }
+
+  await pool.query(
+    "INSERT INTO task_assignments (task_id, telegram_id, user_name) VALUES (?, ?, ?)",
+    [taskId, telegramId, userName],
+  );
+
+  const newAssignments = await getTaskAssignments(taskId);
+  if (newAssignments.length >= task.max_members) {
+    await pool.query("UPDATE tasks SET status = 'مكتملة العدد' WHERE id = ?", [
+      taskId,
+    ]);
+  } else {
+    await pool.query("UPDATE tasks SET status = 'جاري التنفيذ' WHERE id = ?", [
+      taskId,
+    ]);
+  }
+
+  return { success: true };
+}
+
+async function withdrawTask(taskId, telegramId) {
+  await pool.query(
+    "DELETE FROM task_assignments WHERE task_id = ? AND telegram_id = ?",
+    [taskId, telegramId],
+  );
+  const assignments = await getTaskAssignments(taskId);
+  const task = await getTask(taskId);
+
+  if (assignments.length < task.max_members) {
+    await pool.query("UPDATE tasks SET status = 'قيد الانتظار' WHERE id = ?", [
+      taskId,
+    ]);
+  }
+}
+
+async function completeTask(taskId) {
+  await pool.query("UPDATE tasks SET status = 'منتهية' WHERE id = ?", [taskId]);
+}
+
+async function deleteTask(taskId) {
+  await pool.query("DELETE FROM tasks WHERE id = ?", [taskId]);
+}
+
 module.exports = {
   init,
   close: () => pool.end(),
   getUser,
+  getAllUsers,
   registerUser,
   add,
   get,
@@ -213,4 +330,12 @@ module.exports = {
   remove,
   search,
   caseNo,
+  addTask,
+  listTasks,
+  getTask,
+  getTaskAssignments,
+  acceptTask,
+  withdrawTask,
+  completeTask,
+  deleteTask,
 };
