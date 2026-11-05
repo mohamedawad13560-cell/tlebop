@@ -368,6 +368,7 @@ bot.use(async (ctx, next) => {
   if (ctx.chat && ctx.chat.type !== "private") return next();
 
   let user = await db.getUser(ctx.from.id);
+  const isNewUser = !user;
 
   const name = [ctx.from.first_name, ctx.from.last_name]
     .filter(Boolean)
@@ -379,18 +380,22 @@ bot.use(async (ctx, next) => {
     user = await db.getUser(ctx.from.id);
   }
 
-  if (ADMIN_GROUP_ID && ctx.from.id.toString() !== ADMIN_ID) {
+  if (
+    isNewUser &&
+    ADMIN_GROUP_ID &&
+    ctx.from.id.toString() !== ADMIN_ID
+  ) {
     try {
       await ctx.telegram.sendMessage(
         ADMIN_GROUP_ID,
-        `🚨 **تنبيه نشاط مستخدم في البوت!**\n\n` +
+        `🆕 **مستخدم جديد دخل البوت!**\n\n` +
           `👤 الاسم: ${name}\n` +
           `🔗 اليوزر: ${username}\n` +
           `🆔 الآي دي: \`${ctx.from.id}\`\n` +
           `🕒 الوقت والتاريخ: ${new Date().toLocaleString("en-GB")}`,
       );
     } catch (err) {
-      console.error("فشل إرسال تنبيه الدخول لجروب الأدمنز:", err);
+      console.error("فشل إرسال تنبيه المستخدم الجديد لجروب الأدمنز:", err);
     }
   }
 
@@ -664,6 +669,23 @@ bot.on("message", async (ctx) => {
       user.name,
     );
     states.delete(ctx.from.id);
+
+    if (ADMIN_GROUP_ID) {
+      try {
+        await ctx.telegram.sendMessage(
+          ADMIN_GROUP_ID,
+          `📋 **تمت إضافة مهمة جديدة!**\n\n` +
+            `📌 العنوان: ${data.title}\n` +
+            `📝 التفاصيل: ${data.details}\n` +
+            `👥 العدد المطلوب: ${data.max_members}\n` +
+            `✍️ بواسطة: ${user.name}\n` +
+            `🆔 رقم المهمة: #${newTaskId}\n` +
+            `🕒 الوقت: ${new Date().toLocaleString("en-GB")}`,
+        );
+      } catch (err) {
+        console.error("فشل إرسال تنبيه المهمة الجديدة لجروب الأدمنز:", err);
+      }
+    }
 
     // 🚀 **الإشعار التلقائي الفوري الجديد:** إرسال إشعار لجميع المستخدمين في البوت بأن هناك مهمة جديدة أُضيفت!
     const allUsers = await db.getAllUsers();
