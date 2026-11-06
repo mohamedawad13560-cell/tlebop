@@ -41,8 +41,16 @@ const STEPS = {
     ["title", "عنوان القضية؟"],
     ["description", "وصف القضية؟"],
   ],
+  case_suspect: [
+    ["name", "اسم المشتبه به؟"],
+    ["primary_account", "الحساب الأساسي للمشتبه به (يوزر أو رابط)؟"],
+    ["fake_account", "الحساب الوهمي للمشتبه (يوزر أو رابط)؟ أو اكتب: تخطي"],
+    ["evidence_description", "صف الدليل المرتبط بالمشتبه به؟"],
+    ["file", "أرسل ملف أو صورة الدليل، أو اكتب: تخطي"],
+  ],
   suspects: [
     ["name", "اسم المشتبه به؟"],
+    ["primary_account", "الحساب الأساسي للمشتبه به (يوزر أو رابط)؟"],
     ["fake_account", "الحساب الوهمي للمشتبه (يوزر أو رابط)؟ أو اكتب: تخطي"],
     ["details", "المعلومات والوصف؟"],
   ],
@@ -136,7 +144,7 @@ async function itemText(kind, record) {
   }
   const caseLine = `القضية: ${db.caseNo(record.case_id)}\n`;
   if (kind === "suspects") {
-    return `👤 ${record.name}\n${caseLine}🎭 الحساب الوهمي: ${record.fake_account || "غير محدد"}\n\n${record.details || ""}${meta}`;
+    return `👤 ${record.name}\n${caseLine}👤 الحساب الأساسي: ${record.primary_account || "غير محدد"}\n🎭 الحساب الوهمي: ${record.fake_account || "غير محدد"}\n\n${record.details || ""}${meta}`;
   }
   if (kind === "evidence") {
     return `🧾 دليل #${record.id}\n${caseLine}${record.file_id ? "📎 يوجد مرفق" : "بدون مرفق"}\n\n${record.description}${meta}`;
@@ -201,23 +209,23 @@ const showMenu = async (ctx, user) =>
 
 async function showList(ctx, kind, caseId, user) {
   if (!KINDS.includes(kind)) return showMenu(ctx, user);
+  let caseRecord = null;
+  if (caseId && ["suspects", "evidence", "reports"].includes(kind)) {
+    caseRecord = await db.get("cases", caseId);
+    if (
+      caseRecord?.status === "مغلقة" &&
+      user.role !== "admin"
+    ) {
+      return show(ctx, "❌ هذه القضية مغلقة وغير متاحة.", [backRow()]);
+    }
+  }
   const records = await db.list(kind, caseId);
   const buttons = records.map((record) => [
     Markup.button.callback(itemTitle(kind, record), itemCb(kind, record)),
   ]);
   let back = "menu";
   if (kind === "suspects" || kind === "evidence" || kind === "reports") {
-    let canAdd = true;
-    if (caseId) {
-      const caseRecord = await db.get("cases", caseId);
-      if (
-        caseRecord &&
-        caseRecord.status === "مغلقة" &&
-        user.role !== "admin"
-      ) {
-        canAdd = false;
-      }
-    }
+    const canAdd = !caseRecord || caseRecord.status !== "مغلقة";
     if (canAdd) {
       buttons.push([
         Markup.button.callback(
@@ -240,6 +248,8 @@ async function showList(ctx, kind, caseId, user) {
 async function showCase(ctx, id, user) {
   const record = await db.get("cases", id);
   if (!record) return show(ctx, "القضية غير موجودة.", [backRow()]);
+  if (record.status === "مغلقة" && user.role !== "admin")
+    return show(ctx, "❌ هذه القضية مغلقة وغير متاحة.", [backRow()]);
   const rows = [
     [
       Markup.button.callback("👤 المشتبه بهم", `list:suspects:${id}`),
@@ -257,10 +267,51 @@ async function showCase(ctx, id, user) {
   await show(ctx, await itemText("cases", record), rows);
 }
 
+async function saveCaseDraft(ctx, user, state) {
+  const caseId = await db.createCaseWithDetails(
+    state.data,
+    state.suspects,
+    state.evidences,
+    user.name,
+  );
+  states.delete(ctx.from.id);
+
+  if (ADMIN_GROUP_ID) {
+    try {
+      await ctx.telegram.sendMessage(
+        ADMIN_GROUP_ID,
+        `🚨 **تم حفظ قضية جديدة بواسطة عضو!**\n\n` +
+          `👤 العضو: ${user.name} (@${ctx.from.username || "بدون"})\n` +
+          `📁 القضية: ${db.caseNo(caseId)} - ${state.data.title}\n` +
+          `👥 عدد المشتبه بهم: ${state.suspects.length}\n` +
+          `🧾 عدد الأدلة: ${state.evidences.length}\n` +
+          `🕒 الوقت والتاريخ: ${new Date().toLocaleString("en-GB")}`,
+      );
+    } catch (error) {
+      console.error("خطأ في إرسال إشعار القضية الجديدة لجروب الأدمنز:", error);
+    }
+  }
+
+  return ctx.reply(
+    `✅ تم حفظ القضية ${db.caseNo(caseId)} مع ${state.suspects.length} مشتبه بهم و${state.evidences.length} أدلة.`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback("📂 استعراض القضية", `case:${caseId}`)],
+      backRow(),
+    ]),
+  );
+}
+
 async function showItem(ctx, kind, id, user) {
   if (!KINDS.includes(kind) || kind === "cases") return showMenu(ctx, user);
   const record = await db.get(kind, id);
   if (!record) return show(ctx, "السجل غير موجود.", [backRow()]);
+  if (
+    record.case_id &&
+    user.role !== "admin" &&
+    (await db.get("cases", record.case_id))?.status === "مغلقة"
+  ) {
+    return show(ctx, "❌ بيانات هذه القضية المغلقة غير متاحة.", [backRow()]);
+  }
 
   const backTarget =
     kind === "independent_accounts"
@@ -426,6 +477,24 @@ bot.on("callback_query", async (ctx) => {
   const userId = ctx.from.id;
   const user = ctx.state.user;
   if (!user) return;
+  const state = states.get(userId);
+
+  if (action === "case_draft_add" && state?.mode === "case_suspect") {
+    if (!state.readyToSave)
+      return ctx.reply("أكمل بيانات المشتبه به والدليل الحالي أولاً.");
+    state.step = 0;
+    state.readyToSave = false;
+    state.currentSuspect = {};
+    return ctx.reply(
+      `👤 بيانات المشتبه به الجديد\n\n${STEPS.case_suspect[0][1]}`,
+    );
+  }
+  if (action === "case_draft_save" && state?.mode === "case_suspect") {
+    if (!state.readyToSave)
+      return ctx.reply("أكمل بيانات المشتبه به والدليل الحالي أولاً.");
+    return saveCaseDraft(ctx, user, state);
+  }
+
   states.delete(userId);
 
   if (action === "menu") return showMenu(ctx, user);
@@ -541,6 +610,19 @@ bot.on("callback_query", async (ctx) => {
         );
       }
     }
+    if (kind === "cases") {
+      states.set(userId, {
+        mode: "new_case",
+        step: 0,
+        data: {},
+        suspects: [],
+        evidences: [],
+        readyToSave: false,
+      });
+      return ctx.reply(
+        `➕ قضية جديدة\n\n${STEPS.cases[0][1]}\n\n(/cancel للإلغاء)`,
+      );
+    }
     states.set(userId, {
       mode: "new",
       kind,
@@ -583,6 +665,70 @@ bot.on("message", async (ctx) => {
   const state = states.get(ctx.from.id);
   const user = ctx.state.user;
   if (!user || !state) return showMenu(ctx, user);
+
+  if (state.mode === "new_case") {
+    const [field] = STEPS.cases[state.step];
+    if (typeof message.text !== "string")
+      return ctx.reply("أرسل نصاً من فضلك.");
+    const val = message.text.trim();
+    if (!val) return ctx.reply("لا يمكن ترك هذا الحقل فارغاً.");
+    state.data[field] = val;
+    state.step += 1;
+    if (state.step < STEPS.cases.length)
+      return ctx.reply(STEPS.cases[state.step][1]);
+
+    state.mode = "case_suspect";
+    state.step = 0;
+    state.currentSuspect = {};
+    return ctx.reply(
+      `✅ تم إدخال بيانات القضية. يجب إضافة مشتبه به واحد على الأقل ودليل واحد على الأقل.\n\n` +
+        `👤 بيانات المشتبه به الأول\n${STEPS.case_suspect[0][1]}`,
+    );
+  }
+
+  if (state.mode === "case_suspect") {
+    const [field] = STEPS.case_suspect[state.step];
+    if (field === "file") {
+      const [fileId, fileType] = extractFile(message);
+      if (fileId) {
+        state.currentSuspect.file_id = fileId;
+        state.currentSuspect.file_type = fileType;
+      } else if ((message.text || "").trim() !== "تخطي") {
+        return ctx.reply("أرسل ملفاً أو صورة كدليل، أو اكتب: تخطي");
+      }
+    } else {
+      if (typeof message.text !== "string")
+        return ctx.reply("أرسل نصاً من فضلك.");
+      const val = message.text.trim();
+      if (!val && !OPTIONAL.has(field))
+        return ctx.reply("لا يمكن ترك هذا الحقل فارغاً.");
+      state.currentSuspect[field] =
+        OPTIONAL.has(field) && val === "تخطي" ? null : val;
+    }
+
+    state.step += 1;
+    if (state.step < STEPS.case_suspect.length)
+      return ctx.reply(STEPS.case_suspect[state.step][1]);
+
+    const {
+      evidence_description: description,
+      file_id,
+      file_type,
+      ...suspect
+    } = state.currentSuspect;
+    state.suspects.push(suspect);
+    state.evidences.push({ description, file_id, file_type });
+    state.currentSuspect = {};
+    state.step = 0;
+    state.readyToSave = true;
+    return ctx.reply(
+      `تمت إضافة المشتبه به والدليل. عدد المشتبه بهم: ${state.suspects.length}، وعدد الأدلة: ${state.evidences.length}.\nهل تريد إضافة مشتبه به آخر أم حفظ القضية؟`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback("➕ إضافة مشتبه به آخر", "case_draft_add")],
+        [Markup.button.callback("💾 حفظ القضية", "case_draft_save")],
+      ]),
+    );
+  }
 
   // إرسال إنجاز المهمة والتقرير
   if (state.mode === "task_finish_report") {

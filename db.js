@@ -33,6 +33,7 @@ const SCHEMA = [
     id INT AUTO_INCREMENT PRIMARY KEY,
     case_id INT NOT NULL,
     name VARCHAR(255) NOT NULL,
+    primary_account VARCHAR(255),
     fake_account VARCHAR(255),
     details TEXT,
     created_by VARCHAR(255),
@@ -96,7 +97,7 @@ const SCHEMA = [
 
 const COLS = {
   cases: ["title", "description"],
-  suspects: ["case_id", "name", "fake_account", "details"],
+  suspects: ["case_id", "name", "primary_account", "fake_account", "details"],
   evidence: ["case_id", "description", "file_id", "file_type"],
   reports: ["case_id", "title", "body"],
   independent_accounts: [
@@ -111,7 +112,7 @@ const COLS = {
 
 const SEARCH_COLS = {
   cases: ["title", "description"],
-  suspects: ["name", "fake_account", "details"],
+  suspects: ["name", "primary_account", "fake_account", "details"],
   evidence: ["description"],
   reports: ["title", "body"],
   independent_accounts: [
@@ -126,6 +127,13 @@ const caseNo = (id) => `C-${String(id).padStart(4, "0")}`;
 
 async function init() {
   for (const sql of SCHEMA) await pool.query(sql);
+  const [columns] = await pool.query("SHOW COLUMNS FROM suspects LIKE ?", [
+    "primary_account",
+  ]);
+  if (!columns.length)
+    await pool.query(
+      "ALTER TABLE suspects ADD COLUMN primary_account VARCHAR(255) AFTER name",
+    );
 }
 
 async function getUser(telegramId) {
@@ -158,6 +166,57 @@ async function add(kind, createdBy, fields) {
   return res.insertId;
 }
 
+async function createCaseWithDetails(caseFields, suspects, evidences, createdBy) {
+  if (!Array.isArray(suspects) || suspects.length === 0)
+    throw new TypeError("at least one suspect is required");
+  if (!Array.isArray(evidences) || evidences.length === 0)
+    throw new TypeError("at least one evidence record is required");
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [caseResult] = await connection.query(
+      "INSERT INTO cases (title, description, created_by) VALUES (?, ?, ?)",
+      [caseFields.title, caseFields.description, createdBy],
+    );
+
+    for (const suspect of suspects) {
+      await connection.query(
+        "INSERT INTO suspects (case_id, name, primary_account, fake_account, details, created_by) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+          caseResult.insertId,
+          suspect.name,
+          suspect.primary_account,
+          suspect.fake_account,
+          suspect.details ?? null,
+          createdBy,
+        ],
+      );
+    }
+
+    for (const evidence of evidences) {
+      await connection.query(
+        "INSERT INTO evidence (case_id, description, file_id, file_type, created_by) VALUES (?, ?, ?, ?, ?)",
+        [
+          caseResult.insertId,
+          evidence.description,
+          evidence.file_id ?? null,
+          evidence.file_type ?? null,
+          createdBy,
+        ],
+      );
+    }
+
+    await connection.commit();
+    return caseResult.insertId;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 async function get(kind, id) {
   if (!COLS[kind]) throw new Error("invalid kind");
   const [rows] = await pool.query(`SELECT * FROM ${kind} WHERE id = ?`, [id]);
@@ -166,6 +225,13 @@ async function get(kind, id) {
 
 async function list(kind, caseId = 0, limit = 30) {
   if (!COLS[kind]) throw new Error("invalid kind");
+  if (kind === "cases") {
+    const [rows] = await pool.query(
+      "SELECT * FROM cases WHERE status <> 'مغلقة' ORDER BY id DESC LIMIT ?",
+      [limit],
+    );
+    return rows;
+  }
   if (kind !== "cases" && kind !== "independent_accounts" && caseId) {
     const [rows] = await pool.query(
       `SELECT * FROM ${kind} WHERE case_id = ? ORDER BY id DESC LIMIT ?`,
@@ -323,6 +389,7 @@ module.exports = {
   getAllUsers,
   registerUser,
   add,
+  createCaseWithDetails,
   get,
   list,
   countByCase,
